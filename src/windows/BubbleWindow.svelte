@@ -1,13 +1,17 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
+  import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import type { AgentId, Message } from '../../packages/contracts/src';
-  import { client, serviceState } from '../lib/client';
+  import { client, link } from '../lib/client';
   import { pickActiveConversationId } from '../lib/active';
   import { shell } from '../lib/tauri';
 
   let snapshot = $state(client.getSnapshot());
   let input = $state('');
   let error = $state('');
+  let coreState = $state(link.state());
+  let inputElement = $state<HTMLInputElement | null>(null);
+
   const agents: { id: AgentId; name: string }[] = [
     { id: 'chat', name: 'Chat Agent' },
     { id: 'claude-code', name: 'Claude Code' },
@@ -21,7 +25,6 @@
       (run) => run.conversationId === activeId && run.status === 'running',
     ),
   );
-  const unavailable = $derived(serviceState() === 'unavailable');
   const agentName = (id: AgentId) =>
     agents.find((agent) => agent.id === id)?.name ?? id;
 
@@ -35,8 +38,12 @@
     return undefined;
   });
 
-  /** The cloud shows that work is happening, not the whole answer. */
+  /**
+   * 云只表示"正在做什么"，不是聊天记录：给一行状态加一段被截断的回答。
+   * 没有本体时如实说没连接，绝不拿上一轮的旧内容冒充现在的状态。
+   */
   const preview = $derived.by(() => {
+    if (coreState !== 'ready') return '';
     const live = activeRun ? snapshot.drafts[activeRun.id] : undefined;
     const text = activeRun
       ? live || '正在准备回复…'
@@ -46,14 +53,27 @@
   });
 
   onMount(() => {
-    const unsubscribe = client.subscribe(() => {
+    const stop = client.subscribe(() => {
       snapshot = client.getSnapshot();
     });
-    return unsubscribe;
+    const stopLink = link.subscribe(() => {
+      coreState = link.state();
+    });
+    // 打开对话条就是为了打字，焦点应该已经在框里。
+    void tick().then(() => {
+      inputElement?.focus();
+      getCurrentWebviewWindow()
+        .setFocus()
+        .catch(() => undefined);
+    });
+    return () => {
+      stop();
+      stopLink();
+    };
   });
 
   async function send() {
-    if (!activeId || !input.trim()) return;
+    if (!activeId || !input.trim() || coreState !== 'ready') return;
     const text = input;
     input = '';
     error = '';
@@ -63,11 +83,22 @@
       error = cause instanceof Error ? cause.message : '操作失败，请重试';
     }
   }
+
+  function stop() {
+    if (!activeRun) return;
+    error = '';
+    void client.cancelRun(activeRun.id).catch((cause: unknown) => {
+      error = cause instanceof Error ? cause.message : '停止失败，请重试';
+    });
+  }
 </script>
 
 <svelte:window
   onkeydown={(event) => {
-    if (event.key === 'Escape') void shell.hideBubble();
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      void shell.hideBubble();
+    }
   }}
 />
 
@@ -77,11 +108,15 @@
       {#if activeRun}<span class="dots" aria-hidden="true"
           ><i></i><i></i><i></i></span
         >{/if}
-      {activeRun
-        ? `${agentName(activeRun.agentId)} 正在思考`
-        : unavailable
-          ? 'ONE 未连接'
-          : 'ONE'}
+      {coreState === 'ready'
+        ? activeRun
+          ? `${agentName(activeRun.agentId)} 正在思考`
+          : 'ONE'
+        : coreState === 'rejected'
+          ? 'ONE 拒绝了这个客户端'
+          : coreState === 'connecting'
+            ? '正在连接 ONE 本体'
+            : 'ONE 本体未连接'}
       <button
         class="close"
         aria-label="关闭"
@@ -91,7 +126,16 @@
         ✕
       </button>
     </p>
-    <p class="cloud-body" class:working={!!activeRun}>{preview}</p>
+    <p
+      class="cloud-body"
+      class:working={!!activeRun}
+      class:muted={coreState !== 'ready'}
+    >
+      {coreState === 'ready'
+        ? preview
+        : link.problem() ||
+          '本体没有运行或还没接受这个客户端，这里不会显示旧内容。'}
+    </p>
   </section>
 
   <form
@@ -111,18 +155,31 @@
     <label class="sr-only" for="quick-input">对 ONE 说点什么</label>
     <input
       id="quick-input"
+      bind:this={inputElement}
       bind:value={input}
       maxlength="8000"
-      placeholder={error || '对 ONE 说点什么…'}
+      placeholder={error ||
+        (coreState === 'ready' ? '对 ONE 说点什么…' : '本体未连接')}
+      disabled={coreState !== 'ready'}
       onkeydown={(event) => {
+        // 中文输入法确认候选词时也会给 Enter，不能当成发送。
         if (event.key === 'Enter' && !event.isComposing) {
           event.preventDefault();
-          void send();
+          if (!activeRun) void send();
         }
       }}
     />
-    <button class="send" type="submit" disabled={!input.trim()}>发送</button>
+    {#if activeRun}
+      <button class="stop" type="button" onclick={stop}>停止</button>
+    {:else}
+      <button
+        class="send"
+        type="submit"
+        disabled={!input.trim() || coreState !== 'ready'}>发送</button
+      >
+    {/if}
   </form>
+  {#if error}<p class="error" role="alert">{error}</p>{/if}
 </div>
 
 <style>
@@ -199,6 +256,9 @@
   .cloud-body.working {
     color: #303b35;
   }
+  .cloud-body.muted {
+    color: var(--muted);
+  }
   .close {
     margin-left: auto;
     padding: 0 4px;
@@ -227,7 +287,7 @@
     border-radius: 5px;
     cursor: grab;
     background: repeating-linear-gradient(
-      180deg,
+      230deg,
       rgba(64, 103, 71, 0.4) 0 3px,
       transparent 3px 6px
     );
@@ -244,7 +304,11 @@
     outline: 2px solid #688858;
     outline-offset: 2px;
   }
-  .send {
+  input:disabled {
+    color: var(--muted);
+  }
+  .send,
+  .stop {
     flex-shrink: 0;
     padding: 6px 12px;
     border: none;
@@ -252,6 +316,17 @@
     background: var(--accent);
     color: #fff;
     font-size: 12px;
+  }
+  .stop {
+    background: #8a3b2f;
+  }
+  .send:disabled {
+    background: #c3cbc4;
+  }
+  .error {
+    margin: 0;
+    font-size: 12px;
+    color: #8a3b2f;
   }
   @keyframes blink {
     0%,

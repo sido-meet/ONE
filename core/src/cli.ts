@@ -1,0 +1,102 @@
+import { connectToCore } from './link.ts';
+import type { CoreMessage } from '../../packages/contracts/src/wire.ts';
+import { WIRE_VERSION } from '../../packages/contracts/src/wire.ts';
+
+/**
+ * 命令行客户端：ONE 本体不依赖任何图形界面就能使用。
+ * 同时也是客户端协议的最小参考实现——宠物和桌面端走的是同一条路径。
+ */
+const ANSWER_TIMEOUT_MS = 8000;
+
+export async function runCli(argv: string[], pipe?: string) {
+  const messages: CoreMessage[] = [];
+  const pending = new Map<string, (message: CoreMessage) => void>();
+  let firstState: Extract<CoreMessage, { t: 'state' }> | undefined;
+
+  const link = connectToCore({
+    kind: 'cli',
+    label: 'ONE 命令行',
+    capabilities: [],
+    version: WIRE_VERSION,
+    ...(pipe ? { pipe } : {}),
+    onMessage: (message) => {
+      messages.push(message);
+      if (message.t === 'state') firstState ??= message;
+      const key =
+        message.t === 'result'
+          ? message.id
+          : message.t === 'rejected'
+            ? 'rejected'
+            : null;
+      if (key) {
+        pending.get(key)?.(message);
+        pending.delete(key);
+      }
+    },
+  });
+
+  await link.ready;
+
+  /** Never hang: a missing answer is a failure the caller should see. */
+  const ask = (build: (id: string) => unknown) => {
+    const id = crypto.randomUUID();
+    return new Promise<CoreMessage>((resolve) => {
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        resolve({
+          t: 'rejected',
+          message: '核心没有回应该请求',
+        });
+      }, ANSWER_TIMEOUT_MS);
+      pending.set(id, (message) => {
+        clearTimeout(timer);
+        resolve(message);
+      });
+      link.send(build(id) as never);
+    });
+  };
+
+  const [first, second] = argv;
+
+  if (first === 'send') {
+    const conversationId = second ?? 'welcome';
+    const text = argv.slice(2).join(' ');
+    const reply = await ask((id) => ({
+      t: 'call',
+      id,
+      cmd: 'sendMessage',
+      args: [conversationId, text],
+    }));
+    process.stdout.write(`${JSON.stringify(reply)}\n`);
+  } else if (first === 'list') {
+    const reply = await ask((id) => ({ t: 'clients.list', id }));
+    process.stdout.write(`${JSON.stringify(reply)}\n`);
+  } else if (first === 'call') {
+    const reply = await ask((id) => ({
+      t: 'capability.call',
+      id,
+      target: (argv[2] as 'pet' | 'desktop') ?? 'pet',
+      capability: second ?? '',
+    }));
+    process.stdout.write(`${JSON.stringify(reply)}\n`);
+  } else if (first === 'launch') {
+    const reply = await ask((id) => ({
+      t: 'clients.launch',
+      id,
+      kind: (second as 'pet' | 'desktop') ?? 'pet',
+    }));
+    process.stdout.write(`${JSON.stringify(reply)}\n`);
+  } else {
+    // 默认动作：等待第一份快照再报告本体持有的状态。
+    if (!firstState) await new Promise((resolve) => setTimeout(resolve, 300));
+    process.stdout.write(
+      `${JSON.stringify({
+        conversations:
+          firstState?.snapshot.conversations.map((item) => item.title) ?? [],
+        events: firstState?.snapshot.events.length ?? 0,
+      })}\n`,
+    );
+  }
+
+  link.close();
+}

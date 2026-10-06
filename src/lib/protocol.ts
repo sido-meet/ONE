@@ -1,111 +1,50 @@
-import type { ErrorCode, Snapshot } from '../../packages/contracts/src';
+import type {
+  ClientKind,
+  ClientMessage,
+  CoreMessage,
+} from '../../packages/contracts/src/wire.ts';
+import {
+  MAX_FRAME_BYTES,
+  isClientKind,
+  parseCoreMessage,
+} from '../../packages/contracts/src/wire.ts';
 
 /**
- * Window protocol for the 0.1 prototype (docs/03). The main window keeps the
- * authoritative client alive; pet and bubble windows never own state, they send
- * commands and render whatever snapshot arrives last.
+ * 本体 → 客户端这一侧的护栏（ADR-013）。
+ *
+ * 壳把本体的原始行原样转过来，所以"这一行是本体说的"只是一句声明。界面在
+ * 解释任何一帧之前都必须先过这里，坏帧丢掉而不是猜。
  */
-export const HOST_COMMAND = 'one:command';
-export const HOST_RESULT = 'one:result';
-export const HOST_SNAPSHOT = 'one:snapshot';
-export const HOST_HELLO = 'one:hello';
-export const HOST_GOODBYE = 'one:goodbye';
-export const HOST_BEFORE_QUIT = 'one:before-quit';
-export const PET_MENU = 'one:pet-menu';
 
-/** Only these names may cross the window boundary; the host drops anything else. */
-export const COMMAND_NAMES = [
-  'createConversation',
-  'changeAgent',
-  'sendMessage',
-  'cancelRun',
-  'calendarList',
-  'calendarCreate',
-  'calendarUpdate',
-  'calendarDelete',
-  'notesList',
-  'notesCreate',
-  'notesUpdate',
-  'notesDelete',
-] as const;
-export type CommandName = (typeof COMMAND_NAMES)[number];
-
-export interface CommandEnvelope {
-  requestId: string;
-  name: CommandName;
-  args: unknown[];
-}
-export interface ResultEnvelope {
-  requestId: string;
-  ok: boolean;
-  value?: unknown;
-  error?: {
-    code: ErrorCode;
-    message: string;
-    details?: Record<string, unknown>;
-  };
-}
-export interface SnapshotEnvelope {
-  revision: number;
-  snapshot: Snapshot;
-}
-
-export const REQUEST_TIMEOUT_MS = 8000;
-export const HELLO_RETRY_MS = 1200;
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
-
-export function isCommandName(value: unknown): value is CommandName {
-  return (
-    typeof value === 'string' &&
-    (COMMAND_NAMES as readonly string[]).includes(value)
-  );
-}
-
-/** Untrusted input: malformed envelopes are dropped, never partially applied. */
-export function parseCommandEnvelope(value: unknown): CommandEnvelope | null {
-  if (!isRecord(value)) return null;
-  const { requestId, name, args } = value;
-  if (typeof requestId !== 'string' || !requestId) return null;
-  if (!isCommandName(name)) return null;
-  if (!Array.isArray(args)) return null;
-  return { requestId, name, args };
-}
-
-export function parseResultEnvelope(value: unknown): ResultEnvelope | null {
-  if (!isRecord(value)) return null;
-  const { requestId, ok } = value;
-  if (typeof requestId !== 'string' || !requestId) return null;
-  if (typeof ok !== 'boolean') return null;
-  if (ok) return { requestId, ok: true, value: value.value };
-  const error = isRecord(value.error) ? value.error : null;
-  if (
-    !error ||
-    typeof error.code !== 'string' ||
-    typeof error.message !== 'string'
-  )
+/** 超长行说明这一侧出了问题：宁可当没收到，也不让它进内存。 */
+export function parseCoreFrame(line: string): CoreMessage | null {
+  if (line.length > MAX_FRAME_BYTES) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(line);
+  } catch {
     return null;
-  return {
-    requestId,
-    ok: false,
-    error: {
-      code: error.code as ErrorCode,
-      message: error.message,
-      ...(isRecord(error.details)
-        ? { details: error.details as Record<string, unknown> }
-        : {}),
-    },
-  };
+  }
+  return parseCoreMessage(value);
 }
 
-export function parseSnapshotEnvelope(value: unknown): SnapshotEnvelope | null {
-  if (!isRecord(value)) return null;
-  const { revision, snapshot } = value;
-  if (typeof revision !== 'number' || !Number.isInteger(revision)) return null;
-  if (!isRecord(snapshot)) return null;
-  if (!Array.isArray(snapshot.conversations) || !Array.isArray(snapshot.runs))
-    return null;
-  // The proxy is a renderer, not a trusted host: check what it will actually read.
-  return { revision, snapshot: snapshot as unknown as Snapshot };
+export function isClientKindValue(value: unknown): value is ClientKind {
+  return isClientKind(value);
+}
+
+/** 每个请求都要有自己的 id，本体按 id 把回执送回来。 */
+export function newRequestId(): string {
+  return crypto.randomUUID();
+}
+
+export interface ClientHello {
+  t: 'hello';
+  v: number;
+  client: { kind: ClientKind; label: string; capabilities: string[] };
+}
+
+export function isClientHello(value: unknown): value is ClientMessage {
+  if (typeof value !== 'object' || value === null) return false;
+  const frame = value as { t?: unknown };
+  return frame.t === 'hello';
 }

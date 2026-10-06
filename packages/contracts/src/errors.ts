@@ -14,13 +14,20 @@ export type ErrorCode =
   | 'INTERNAL';
 
 export class ClientError extends Error {
+  readonly code: ErrorCode;
+  /** Machine-readable context for the UI, e.g. both versions on a conflict. */
+  readonly details?: Record<string, unknown>;
+
+  // Plain fields instead of constructor parameter properties: the core process
+  // runs on Node's strip-only TypeScript support, which rejects that syntax.
   constructor(
-    public readonly code: ErrorCode,
+    code: ErrorCode,
     message: string,
-    /** Machine-readable context for the UI, e.g. both versions on a conflict. */
-    public readonly details?: Record<string, unknown>,
+    details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = 'ClientError';
+    this.code = code;
+    this.details = details;
   }
 }

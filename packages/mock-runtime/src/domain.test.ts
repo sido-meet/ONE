@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createMockClient } from './index';
-import type { CommandContext, OneClient } from '../../contracts/src';
+import { createMockClient } from './index.ts';
+import type { CommandContext, OneClient } from '../../contracts/src/index.ts';
 
 let client: OneClient;
 afterEach(() => {

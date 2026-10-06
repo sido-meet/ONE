@@ -1,4 +1,4 @@
-import { ClientError } from '../../contracts/src';
+import { ClientError } from '../../contracts/src/index.ts';
 import {
   assertValidRange,
   parseCalendarCreate,
@@ -10,7 +10,7 @@ import {
   parseNotesList,
   parseNotesUpdate,
   requestDigest,
-} from '../../contracts/src';
+} from '../../contracts/src/index.ts';
 import type {
   CalendarEvent,
   CalendarPage,
@@ -19,7 +19,7 @@ import type {
   Note,
   NotePage,
   NoteSummary,
-} from '../../contracts/src';
+} from '../../contracts/src/index.ts';
 
 export interface AuditEntry {
   auditRef: string;

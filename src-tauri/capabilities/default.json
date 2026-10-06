@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "one-windows",
-  "description": "Pet, bubble and main windows. Events only; window actions go through shell commands. No filesystem, process or network plugin access.",
+  "description": "Every window ONE opens, whichever client this process is. Events only; window actions and everything reaching ONE 本体 go through shell commands. No filesystem, process or network plugin access.",
   "windows": ["main", "pet", "bubble"],
   "permissions": [
     "core:default",

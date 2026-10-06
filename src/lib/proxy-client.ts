@@ -1,163 +1,63 @@
-import { ClientError } from '../../packages/contracts/src';
-import type {
-  AgentId,
-  CommandContext,
-  OneClient,
-  Snapshot,
-} from '../../packages/contracts/src';
-import {
-  HOST_HELLO,
-  HOST_RESULT,
-  HOST_SNAPSHOT,
-  parseResultEnvelope,
-  parseSnapshotEnvelope,
-  REQUEST_TIMEOUT_MS,
-} from './protocol';
-import type { CommandName } from './protocol';
-import type { Transport } from './transport';
-
-export type ServiceState = 'connecting' | 'ready' | 'unavailable';
-
-/** Empty until the host answers; the UI shows a loading state, never fake data. */
-const EMPTY_SNAPSHOT: Snapshot = {
-  workspaces: [],
-  conversations: [],
-  events: [],
-  runs: [],
-  drafts: {},
-  notes: [],
-  calendarEvents: [],
-};
+import { ClientError } from '../../packages/contracts/src/index.ts';
+import type { ClientKind } from '../../packages/contracts/src/wire.ts';
+import type { CoreClient } from './core-link';
 
 /**
- * Pet and bubble windows hold no state of their own. Every call becomes a
- * request to the authoritative host, and the last accepted snapshot is the
- * only thing they render. Stale revisions are dropped.
+ * 请另一个客户端做事（ADR-013）。
+ *
+ * 0.1 之前是"向主窗口发一条事件"，失败会静默消失。现在请求必须经过本体：
+ * 对方没在运行、没装这个能力、或者没回应，都会变成一条具体的错误，
+ * 界面才能把"宠物没开"告诉用户，而不是让按钮点了没反应。
  */
-export interface ProxyClient {
-  client: OneClient;
-  state(): ServiceState;
-  dispose(): void;
+export async function askClient(
+  link: CoreClient,
+  target: ClientKind,
+  capability: string,
+  args?: unknown,
+): Promise<unknown> {
+  try {
+    return await link.callCapability(target, capability, args);
+  } catch (cause) {
+    throw new ClientError(
+      cause instanceof ClientError ? cause.code : 'INTERNAL',
+      describe(cause, target, capability),
+      cause instanceof ClientError ? cause.details : undefined,
+    );
+  }
 }
 
-export function createProxyClient(transport: Transport): ProxyClient {
-  let revision = -1;
-  let snapshot: Snapshot = EMPTY_SNAPSHOT;
-  let state: ServiceState = 'connecting';
-  const listeners = new Set<() => void>();
-  const pending = new Map<
-    string,
-    { resolve: (value: unknown) => void; reject: (cause: unknown) => void }
-  >();
+function describe(
+  cause: unknown,
+  target: ClientKind,
+  capability: string,
+): string {
+  const message = cause instanceof Error ? cause.message : '';
+  if (cause instanceof ClientError) {
+    if (cause.code === 'NOT_FOUND' && message.includes('没有在运行'))
+      return `${target === 'pet' ? 'ONE 宠物' : 'ONE 桌面端'}没有在运行`;
+    if (cause.code === 'NOT_FOUND') return `${target} 没有提供 ${capability}`;
+    if (cause.code === 'TIMEOUT') return `${target} 没有回应，请稍后再试`;
+    if (cause.code === 'UNAVAILABLE') return 'ONE 本体没有连接';
+  }
+  return message || '请求另一个客户端失败';
+}
 
-  const settle = () => {
-    listeners.forEach((listener) => listener());
-  };
-  const markUnavailable = () => {
-    if (state !== 'unavailable') {
-      state = 'unavailable';
-      settle();
-    }
-  };
-
-  const stopSnapshot = transport.listen(HOST_SNAPSHOT, (payload) => {
-    const envelope = parseSnapshotEnvelope(payload);
-    if (!envelope || envelope.revision <= revision) return;
-    revision = envelope.revision;
-    snapshot = envelope.snapshot;
-    state = 'ready';
-    settle();
-  });
-
-  const stopResult = transport.listen(HOST_RESULT, (payload) => {
-    const envelope = parseResultEnvelope(payload);
-    if (!envelope) return;
-    const entry = pending.get(envelope.requestId);
-    if (!entry) return;
-    pending.delete(envelope.requestId);
-    if (envelope.ok && envelope.error === undefined)
-      entry.resolve(envelope.value);
-    else if (envelope.error)
-      entry.reject(
-        new ClientError(
-          envelope.error.code,
-          envelope.error.message,
-          envelope.error.details,
-        ),
-      );
-    else markUnavailable();
-  });
-
-  const request = <T>(name: CommandName, args: unknown[]): Promise<T> =>
-    new Promise<T>((resolve, reject) => {
-      const requestId = crypto.randomUUID();
-      const timer = setTimeout(() => {
-        pending.delete(requestId);
-        markUnavailable();
-        reject(
-          new ClientError('TIMEOUT', '原型服务没有响应，请重新打开主窗口'),
-        );
-      }, REQUEST_TIMEOUT_MS);
-      pending.set(requestId, {
-        resolve: (value) => {
-          clearTimeout(timer);
-          resolve(value as T);
-        },
-        reject: (cause) => {
-          clearTimeout(timer);
-          reject(cause);
-        },
-      });
-      transport.send('one:command', { requestId, name, args });
-    });
-
-  // Ask for the current snapshot immediately; the host answers with a broadcast.
-  transport.send(HOST_HELLO, {});
-
-  const dispose = () => {
-    stopSnapshot();
-    stopResult();
-    pending.forEach((entry) =>
-      entry.reject(new ClientError('DISPOSED', '窗口已关闭')),
+/** 拉起另一个客户端：能不能拉起由本体判断，本体不知道的种类会明确拒绝。 */
+export async function launchClient(
+  link: CoreClient,
+  kind: ClientKind,
+): Promise<{ alreadyRunning?: boolean; launched?: string }> {
+  try {
+    const value = await link.launch(kind);
+    return (value ?? {}) as { alreadyRunning?: boolean; launched?: string };
+  } catch (cause) {
+    throw new ClientError(
+      cause instanceof ClientError ? cause.code : 'INTERNAL',
+      cause instanceof ClientError && cause.code === 'NOT_FOUND'
+        ? `ONE ${kind} 还没有安装`
+        : cause instanceof Error
+          ? cause.message
+          : '拉起客户端失败',
     );
-    pending.clear();
-    listeners.clear();
-  };
-
-  return {
-    client: {
-      getSnapshot: () => snapshot,
-      subscribe(listener) {
-        listeners.add(listener);
-        return () => {
-          listeners.delete(listener);
-        };
-      },
-      createConversation: (title) => request('createConversation', [title]),
-      changeAgent: (conversationId: string, agentId: AgentId) =>
-        request('changeAgent', [conversationId, agentId]),
-      sendMessage: (conversationId: string, text: string) =>
-        request('sendMessage', [conversationId, text]),
-      cancelRun: (runId: string) => request('cancelRun', [runId]),
-      calendarList: (context: CommandContext, input: unknown) =>
-        request('calendarList', [context, input]),
-      calendarCreate: (context: CommandContext, input: unknown) =>
-        request('calendarCreate', [context, input]),
-      calendarUpdate: (context: CommandContext, input: unknown) =>
-        request('calendarUpdate', [context, input]),
-      calendarDelete: (context: CommandContext, input: unknown) =>
-        request('calendarDelete', [context, input]),
-      notesList: (context: CommandContext, input: unknown) =>
-        request('notesList', [context, input]),
-      notesCreate: (context: CommandContext, input: unknown) =>
-        request('notesCreate', [context, input]),
-      notesUpdate: (context: CommandContext, input: unknown) =>
-        request('notesUpdate', [context, input]),
-      notesDelete: (context: CommandContext, input: unknown) =>
-        request('notesDelete', [context, input]),
-      dispose,
-    },
-    state: () => state,
-    dispose,
-  };
+  }
 }

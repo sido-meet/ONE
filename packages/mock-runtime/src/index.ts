@@ -1,5 +1,5 @@
-import { ClientError } from '../../contracts/src';
-import { createDomainCommands, createDomainState } from './domain';
+import { ClientError } from '../../contracts/src/index.ts';
+import { createDomainCommands, createDomainState } from './domain.ts';
 import type {
   AgentId,
   Conversation,
@@ -8,7 +8,7 @@ import type {
   OneClient,
   Run,
   Snapshot,
-} from '../../contracts/src';
+} from '../../contracts/src/index.ts';
 
 export const agents: { id: AgentId; name: string }[] = [
   { id: 'chat', name: 'Chat Agent' },

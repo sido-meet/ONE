@@ -47,13 +47,25 @@ desktop:build 当前只构建可执行程序，不生成安装包。Tauri 标识
 
 应用图标是脚本生成的占位标记（`src-tauri/icons/source.png` 为 1024×1024 源图，`pnpm exec tauri icon src-tauri/icons/source.png` 生成其余尺寸），不是品牌资产，发布前需替换并记录作者与授权。
 
-壳现在创建三个窗口：`main`（权威状态宿主）、`pet`（128×128 透明置顶）、`bubble`（400×560，初始隐藏）。窗口动作只能通过 `invoke` 调用壳命令，能力文件只开放事件收发。
+壳按客户端种类动态建窗：`pet`（128×128 透明置顶）、`bubble`（380×168 无边框透明置顶，初始隐藏）、`main`（1200×820，仅桌面端客户端）。`tauri.conf.json` 的 `app.windows` 为空数组，窗口在 `setup` 里按客户端种类创建，两种客户端加载同一份前端。窗口动作只能通过 `invoke` 调用壳命令，能力文件只开放事件收发。
+
+启动本体需要 `ONE_REPO_ROOT`（或从编译期的 `CARGO_MANIFEST_DIR` 向上找到 `core/src/index.ts`），本体用系统里的 `node` 跑源码。0.1 用 `ONE_INSTALLED` 环境变量代替安装器，默认 `pet`。客户端种类有两种传法：已构建的 exe 用 `--client=pet`，`tauri dev` 用 `ONE_CLIENT=pet`（Tauri CLI 会把 `--client=` 错位传给 cargo）。
 
 ```powershell
-pnpm desktop:dev                # 启动 Vite + 桌面壳
-pnpm desktop:build              # 原生可执行程序（release）
-Set-Location src-tauri; cargo test   # 窗口定位等 Rust 单测
+pnpm core            # 只启动 ONE 本体
+pnpm core:cli list   # 用命令行客户端看本体持有的状态与名册
+pnpm pet:dev         # 宠物客户端（tauri dev）
+pnpm desktop:dev     # 桌面端客户端（tauri dev）
+pnpm desktop:build   # 原生可执行程序（release），会重新嵌入前端资源
+pnpm client:pet      # 跑已构建的宠物客户端
+Set-Location src-tauri; cargo test   # 窗口定位、菜单接线、帧边界等 Rust 单测
 ```
+
+**发布版必须用 `pnpm desktop:build`。** `cargo build --release` 不会重新嵌入前端资源，会得到一个打开就是"无法访问此页面"的程序。`scripts/client.mjs` 会先确保本体在运行、再拉起客户端。
+
+## 改管道代码前必读
+
+壳与本体之间是 Windows 命名管道。写入句柄由 `File::try_clone()` 得到，而 Windows 上 `try_clone` 走 `DuplicateHandle`：两个句柄指向同一个文件对象，同步 I/O 在文件对象上串行化。**只要读取线程停在 `ReadFile` 里等数据，写端就永远发不出去** —— 而本体在收到第一帧之前不会主动说话，所以握手会静默卡死，症状是"名册里没有这个客户端，但管道明明连上了"。现在的读端用 `PeekNamedPipe` 轮询，没有数据就让出文件对象（`src-tauri/src/core_link.rs`）。改这块之前先读那里的注释。
 
 ## 常用命令
 

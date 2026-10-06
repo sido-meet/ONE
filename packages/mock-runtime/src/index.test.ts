@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createMockClient } from './index';
-import type { OneClient } from '../../contracts/src';
+import { createMockClient } from './index.ts';
+import type { OneClient } from '../../contracts/src/index.ts';
 
 let client: OneClient;
 afterEach(() => {

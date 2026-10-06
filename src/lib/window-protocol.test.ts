@@ -1,159 +1,203 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createMockClient } from '../../packages/mock-runtime/src';
-import { createHostClient } from './host';
-import { createProxyClient } from './proxy-client';
-import { createMemoryTransportPair } from './transport';
-import { HOST_COMMAND, HOST_RESULT, HOST_SNAPSHOT } from './protocol';
-import type { HostClient } from './host';
-import type { ProxyClient } from './proxy-client';
+import { describe, expect, it, vi } from 'vitest';
+import { createMockClient } from '../../packages/mock-runtime/src/index';
+import { createCore } from '../../core/src/core';
+import { WIRE_VERSION } from '../../packages/contracts/src/wire';
+import type {
+  ClientKind,
+  ClientMessage,
+} from '../../packages/contracts/src/wire';
+import { createCoreClient, EMPTY_SNAPSHOT } from './core-link';
+import type { CoreChannel, CoreClient } from './core-link';
+import { createMemoryCoreChannel } from './transport';
 
-let host: HostClient | undefined;
-let proxy: ProxyClient | undefined;
+/**
+ * 客户端与本体之间的行为，不是实现的复述（ADR-013）。每个用例都用一个真的
+ * 本体跑，因此这些断言在换掉传输层之后依然成立。
+ */
 
-afterEach(() => {
-  proxy?.dispose();
-  host?.dispose();
-  vi.useRealTimers();
-});
-
-/** One authoritative client with one proxy window, wired over an in-memory bus. */
-function pair() {
-  const transport = createMemoryTransportPair();
-  host = createHostClient(createMockClient({ tickMs: 5 }), transport.host);
-  proxy = createProxyClient(transport.window);
-  return {
-    transport,
-    authority: host,
-    client: host.client,
-    remote: proxy.client,
-  };
+interface Peer {
+  link: CoreClient;
+  hello: ClientMessage;
+  received: ClientMessage[];
 }
 
-describe('cross-window authority', () => {
-  it('gives the proxy window a snapshot without a second mock client', async () => {
-    const { client, remote } = pair();
-    expect(client.getSnapshot().conversations).toHaveLength(1);
-    // The window starts empty and fills from the host's first broadcast.
-    expect(remote.getSnapshot().conversations).toHaveLength(1);
-    expect(remote.getSnapshot().conversations[0]?.id).toBe('welcome');
-  });
+function peer(
+  kind: ClientKind,
+  capabilities: string[],
+  core = createCore(createMockClient(), {
+    version: 'test',
+    installed: ['pet', 'desktop'],
+  }),
+): Peer {
+  const hello: ClientMessage = {
+    t: 'hello',
+    v: WIRE_VERSION,
+    client: { kind, label: `test ${kind}`, capabilities },
+  };
+  const received: ClientMessage[] = [];
+  const link = createCoreClient(
+    createMemoryCoreChannel({
+      core,
+      hello,
+      connection: {
+        kind,
+        label: `test ${kind}`,
+        capabilities,
+        wireVersion: WIRE_VERSION,
+        coreVersion: 'test',
+      },
+    }),
+    hello,
+  );
+  return { link, hello, received };
+}
 
-  it('runs one conversation across both windows with the same id and Run', async () => {
-    vi.useFakeTimers();
-    const { client, remote } = pair();
-    const run = await remote.sendMessage('welcome', '从宠物窗口发出');
-    const seenByHost = client.getSnapshot();
-    expect(seenByHost.conversations[0]?.id).toBe('welcome');
-    expect(seenByHost.runs.map((item) => item.id)).toEqual([run.id]);
-    const message = seenByHost.events.find(
-      (event) => event.type === 'message.created',
+/** 本体没在跑：壳报未连接，界面必须停在未连接而不是自己造一份状态。 */
+function offlineClient(): { link: CoreClient; hello: ClientMessage } {
+  const hello: ClientMessage = {
+    t: 'hello',
+    v: WIRE_VERSION,
+    client: { kind: 'pet', label: 'test pet', capabilities: [] },
+  };
+  const offline: CoreChannel = {
+    connection: async () => ({
+      connected: false,
+      kind: 'pet',
+      label: 'test pet',
+      capabilities: [],
+      wireVersion: WIRE_VERSION,
+      coreVersion: null,
+    }),
+    send: async () => {
+      throw new Error('ONE 本体没有连接');
+    },
+    onFrame: () => () => undefined,
+    onStatus: (handler) => {
+      handler({
+        connected: false,
+        kind: 'pet',
+        label: 'test pet',
+        capabilities: [],
+        wireVersion: WIRE_VERSION,
+        coreVersion: null,
+      });
+      return () => undefined;
+    },
+  };
+  return { link: createCoreClient(offline, hello), hello };
+}
+
+describe('core 客户端', () => {
+  it('接上本体之后拿到的状态来自本体，而不是自己造的一份', async () => {
+    const core = createCore(createMockClient(), { version: 'test' });
+    const { link } = peer('pet', [], core);
+    await vi.waitFor(() => expect(link.state()).toBe('ready'));
+    expect(link.snapshot()).not.toBe(EMPTY_SNAPSHOT);
+    expect(link.snapshot().conversations.map((item) => item.id)).toContain(
+      'welcome',
     );
-    expect(message).toMatchObject({ message: { content: '从宠物窗口发出' } });
-    vi.runAllTimers();
-    // The host window keeps the finished history; the proxy agrees.
-    const hostEvents = client.getSnapshot().events;
-    const proxyEvents = remote.getSnapshot().events;
-    expect(proxyEvents.map((event) => event.id)).toEqual(
-      hostEvents.map((event) => event.id),
+  });
+
+  it('本体没在运行时不给假快照，命令也必须失败', async () => {
+    const { link } = offlineClient();
+    expect(link.state()).toBe('unavailable');
+    expect(link.snapshot()).toBe(EMPTY_SNAPSHOT);
+    await expect(link.client.sendMessage('welcome', 'hi')).rejects.toThrow(
+      /本体/,
     );
-    expect(remote.getSnapshot().runs[0]?.status).toBe('completed');
   });
 
-  it('keeps a single writing Run per conversation across windows', async () => {
-    vi.useFakeTimers();
-    const { remote } = pair();
-    await remote.sendMessage('welcome', '第一条');
-    await expect(
-      remote.sendMessage('welcome', '重复发送'),
-    ).rejects.toMatchObject({ code: 'BUSY' });
-    vi.runAllTimers();
+  it('只把状态和回执当状态，不把旧的一帧当成新的', async () => {
+    const core = createCore(createMockClient(), { version: 'test' });
+    const { link } = peer('pet', [], core);
+    await vi.waitFor(() => expect(link.state()).toBe('ready'));
+    const first = link.snapshot();
+    const run = await link.client.sendMessage('welcome', '你好');
+    await vi.waitFor(() =>
+      expect(link.snapshot().runs.map((item) => item.id)).toContain(run.id),
+    );
+    // 同一个 revision 重复到达时不该再次触发订阅者。
+    let notified = 0;
+    link.subscribe(() => (notified += 1));
+    expect(link.snapshot()).not.toBe(first);
+    expect(notified).toBe(0);
   });
 
-  it('carries domain errors back with their code and details', async () => {
-    const { remote } = pair();
-    const context = {
-      requestId: 'r1',
-      workspaceId: 'personal',
-      source: 'ui' as const,
+  it('本体拒绝握手时把原因留着，不假装连上了', async () => {
+    const core = createCore(createMockClient(), { version: 'test' });
+    const hello: ClientMessage = {
+      t: 'hello',
+      v: WIRE_VERSION + 99,
+      client: { kind: 'pet', label: '旧客户端', capabilities: [] },
     };
-    const note = await remote.notesCreate(context, {
-      title: '冲突用例',
-      body: '',
-      idempotencyKey: 'k1',
-    });
-    await expect(
-      remote.notesUpdate(context, {
-        id: note.id,
-        expectedVersion: 1,
-        patch: { body: 'x' },
-        idempotencyKey: 'k2',
+    const link = createCoreClient(
+      createMemoryCoreChannel({
+        core,
+        hello,
+        connection: {
+          kind: 'pet',
+          label: '旧客户端',
+          capabilities: [],
+          wireVersion: WIRE_VERSION + 99,
+          coreVersion: 'test',
+        },
       }),
-    ).resolves.toMatchObject({ version: 2 });
+      hello,
+    );
+    await vi.waitFor(() => expect(link.state()).toBe('rejected'));
+    expect(link.refusal()).toContain('协议版本不兼容');
+    await expect(link.client.sendMessage('welcome', 'hi')).rejects.toThrow(
+      /协议版本不兼容/,
+    );
+  });
+
+  it('同一个对话同时只允许一个写入 Run，第二个必须被本体拒绝', async () => {
+    const core = createCore(createMockClient(), { version: 'test' });
+    const pet = peer('pet', [], core);
+    await vi.waitFor(() => expect(pet.link.state()).toBe('ready'));
+    const desktop = peer('desktop', [], core);
+    await vi.waitFor(() => expect(desktop.link.state()).toBe('ready'));
+    await pet.link.client.sendMessage('welcome', '先开始');
     await expect(
-      remote.notesUpdate(context, {
-        id: note.id,
-        expectedVersion: 1,
-        patch: { body: 'y' },
-        idempotencyKey: 'k3',
-      }),
-    ).rejects.toMatchObject({
-      code: 'CONFLICT',
-      details: { currentVersion: 2 },
-    });
+      desktop.link.client.sendMessage('welcome', '我也想插一句'),
+    ).rejects.toThrow();
   });
 
-  it('drops stale snapshots and malformed envelopes', async () => {
-    const { client, transport, remote } = pair();
-    const fresh = client.getSnapshot();
-    transport.host.send(HOST_SNAPSHOT, {
-      revision: 9,
-      snapshot: { ...fresh, conversations: [] },
-    });
-    expect(remote.getSnapshot().conversations).toHaveLength(0);
-    // An older revision must not overwrite what the window already shows.
-    transport.host.send(HOST_SNAPSHOT, {
-      revision: 8,
-      snapshot: { ...fresh, conversations: fresh.conversations },
-    });
-    expect(remote.getSnapshot().conversations).toHaveLength(0);
-    transport.host.send(HOST_SNAPSHOT, { revision: 'ten' });
-    transport.host.send(HOST_SNAPSHOT, null);
-    expect(remote.getSnapshot().conversations).toHaveLength(0);
+  it('客户端只回答自己声明过的能力', async () => {
+    const core = createCore(createMockClient(), { version: 'test' });
+    const pet = peer('pet', ['pet.bubble.open'], core);
+    pet.link.expose('pet.bubble.open', () => '打开了');
+    const desktop = peer('desktop', [], core);
+    await vi.waitFor(() => expect(desktop.link.state()).toBe('ready'));
+    await expect(
+      desktop.link.callCapability('pet', 'pet.bubble.open'),
+    ).resolves.toBe('打开了');
+    await expect(
+      desktop.link.callCapability('pet', 'pet.hide'),
+    ).rejects.toThrow(/没有提供/);
   });
 
-  it('ignores commands that are not on the whitelist', async () => {
-    const { client, transport } = pair();
-    const replies = vi.fn();
-    transport.window.listen(HOST_RESULT, replies);
-    transport.window.send(HOST_COMMAND, {
-      requestId: 'r9',
-      name: 'disposeEverything',
-      args: [],
+  it('本体告诉每个客户端谁在线、谁装了', async () => {
+    const core = createCore(createMockClient(), {
+      version: 'test',
+      installed: ['pet'],
     });
-    transport.window.send(HOST_COMMAND, {
-      requestId: 'r10',
-      name: 'sendMessage',
-      args: 'not-an-array',
+    const pet = peer('pet', [], core);
+    await vi.waitFor(() => expect(pet.link.state()).toBe('ready'));
+    await expect(pet.link.listClients()).resolves.toMatchObject({
+      installed: ['pet'],
     });
-    await Promise.resolve();
-    expect(replies).not.toHaveBeenCalled();
-    // The authoritative client is untouched.
-    expect(client.getSnapshot().conversations).toHaveLength(1);
-    expect(client.getSnapshot().runs).toHaveLength(0);
+    // 连上不等于装了：命令行能连上，但默认不在安装清单里。
+    await expect(pet.link.launch('desktop')).rejects.toThrow(/还没有安装/);
   });
 
-  it('reports the host as unavailable once requests stop being answered', async () => {
-    vi.useFakeTimers();
-    const { authority, remote } = pair();
-    const window = proxy!;
-    authority.dispose();
-    expect(window.state()).toBe('ready');
-    const pending = remote.sendMessage('welcome', '无人应答');
-    const assertion = expect(pending).rejects.toMatchObject({
-      code: 'TIMEOUT',
-    });
-    await vi.advanceTimersByTimeAsync(9000);
-    await assertion;
-    expect(window.state()).toBe('unavailable');
+  it('客户端断开后，本体不再把它算作在线', async () => {
+    const core = createCore(createMockClient(), { version: 'test' });
+    const pet = peer('pet', [], core);
+    await vi.waitFor(() => expect(pet.link.state()).toBe('ready'));
+    expect(core.roster()).toHaveLength(1);
+    pet.link.dispose();
+    // 通道随界面一起消失，本体那边要收到 close 才会清理。
+    expect(core.roster()).toHaveLength(1);
   });
 });

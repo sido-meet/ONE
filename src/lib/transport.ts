@@ -1,44 +1,61 @@
-/**
- * Injectable event channel. The Tauri implementation lives in `tauri.ts`; tests
- * use an in-memory pair, so the window protocol can be verified without a
- * desktop build.
- */
-export interface Transport {
-  send(event: string, payload: unknown): void;
-  /** Returns a synchronous cancel function even though registration is async. */
-  listen(event: string, handler: (payload: unknown) => void): () => void;
-}
+import type { ClientMessage } from '../../packages/contracts/src/wire.ts';
+import type { Core } from '../../core/src/core.ts';
+import type { CoreChannel, CoreConnection } from './core-link';
 
 /**
- * Two transports wired to one queue. `host` delivers to whatever `window` ends
- * listen for, and `window` delivers to whatever `host` ends listen for.
+ * 进程内的通道：真的建一个本体，把它的帧原样转给界面。
+ *
+ * 浏览器预览和测试都用它。预览因此不是"假数据模式"，而是本体跑在同一个进程
+ * 里——和桌面上唯一的区别是传输层，不该有第二套语义。
  */
-export function createMemoryTransportPair(): {
-  host: Transport;
-  window: Transport;
-} {
-  const toHost = new Map<string, Set<(payload: unknown) => void>>();
-  const toWindow = new Map<string, Set<(payload: unknown) => void>>();
-  const register = (
-    target: Map<string, Set<(payload: unknown) => void>>,
-    event: string,
-    handler: (payload: unknown) => void,
-  ) => {
-    const handlers = target.get(event) ?? new Set();
-    handlers.add(handler);
-    target.set(event, handlers);
-    return () => handlers.delete(handler);
+export function createMemoryCoreChannel(options: {
+  core: Core;
+  hello: ClientMessage;
+  connection: Omit<CoreConnection, 'connected'>;
+}): CoreChannel {
+  const frameHandlers = new Set<(line: string) => void>();
+  const statusHandlers = new Set<(status: CoreConnection) => void>();
+  let session: ReturnType<Core['connect']> = null;
+  let connected = true;
+
+  const status = (): CoreConnection => ({ ...options.connection, connected });
+
+  const publish = () => {
+    const current = status();
+    statusHandlers.forEach((handler) => handler(current));
   };
+
+  const deliver = (message: unknown) => {
+    const line = JSON.stringify(message);
+    frameHandlers.forEach((handler) => handler(line));
+  };
+
   return {
-    host: {
-      send: (event, payload) =>
-        toWindow.get(event)?.forEach((handler) => handler(payload)),
-      listen: (event, handler) => register(toHost, event, handler),
+    async connection() {
+      return status();
     },
-    window: {
-      send: (event, payload) =>
-        toHost.get(event)?.forEach((handler) => handler(payload)),
-      listen: (event, handler) => register(toWindow, event, handler),
+    async send(frame: ClientMessage) {
+      if (!connected) throw new Error('ONE 本体没有连接');
+      if (!session) {
+        // 第一帧建立会话，之后每一帧都是命令，和真实管道完全一致。
+        session = options.core.connect(
+          { send: deliver, close: () => undefined },
+          frame,
+        );
+        if (!session) return;
+        publish();
+        return;
+      }
+      options.core.handleMessage(session, frame);
+    },
+    onFrame(handler) {
+      frameHandlers.add(handler);
+      return () => frameHandlers.delete(handler);
+    },
+    onStatus(handler) {
+      statusHandlers.add(handler);
+      handler(status());
+      return () => statusHandlers.delete(handler);
     },
   };
 }

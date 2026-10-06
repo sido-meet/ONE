@@ -1,4 +1,4 @@
-import { ClientError } from './errors';
+import { ClientError } from './errors.ts';
 
 /** Calendar and Notes domain contracts (docs/04). */
 

@@ -1,10 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod core_link;
+
 use std::time::Duration;
 
+use serde_json::{json, Value};
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
-    AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow,
+    menu::{Menu, MenuItem},
+    AppHandle, Emitter, Manager, PhysicalPosition, State, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder,
 };
 
 const PET: &str = "pet";
@@ -12,8 +16,108 @@ const BUBBLE: &str = "bubble";
 const MAIN: &str = "main";
 const BEFORE_QUIT: &str = "one:before-quit";
 const GAP: i32 = 12;
+/// Menu item ids. A menu entry without a handler is a button that silently does
+/// nothing, so the ids are constants and `menu_action` has to answer for all of
+/// them (see the test of the same name).
+const LAUNCH_DESKTOP: &str = "launch_desktop";
+const LAUNCH_PET: &str = "launch_pet";
+const RESTART_CORE: &str = "restart_core";
+const PET_BUBBLE: &str = "pet_bubble";
+const PET_SHOW: &str = "pet_show";
+const QUIT: &str = "quit";
+
+/// What a menu entry does. Clients never spawn each other: launching and asking
+/// the pet to do something both go through core, the only thing that knows what
+/// is installed and who is connected.
+#[derive(Debug, PartialEq, Eq)]
+enum MenuAction {
+    Launch(&'static str),
+    RestartCore,
+    PetCapability(&'static str),
+    Quit,
+}
+
+fn menu_action(id: &str) -> Option<MenuAction> {
+    Some(match id {
+        LAUNCH_DESKTOP => MenuAction::Launch("desktop"),
+        LAUNCH_PET => MenuAction::Launch("pet"),
+        RESTART_CORE => MenuAction::RestartCore,
+        PET_BUBBLE => MenuAction::PetCapability("pet.bubble.open"),
+        PET_SHOW => MenuAction::PetCapability("pet.show"),
+        QUIT => MenuAction::Quit,
+        _ => return None,
+    })
+}
 /// If the host window cannot answer, quitting must not hang the app.
 const QUIT_GRACE: Duration = Duration::from_millis(3000);
+/// Kept in sync with packages/contracts/src/wire.ts.
+const WIRE_VERSION: u32 = 1;
+
+/// A client is a presentation form, not a different program. The same binary
+/// starts as the pet (default) or as the desktop; core owns all the state.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ClientKindArg {
+    Pet,
+    Desktop,
+}
+
+impl ClientKindArg {
+    /// 两种传法：命令行参数给已构建的二进制，环境变量给 tauri dev。
+    /// 后者是因为 Tauri CLI 会把 `--` 之后的参数错位给 cargo，参数传不进去。
+    fn parse() -> Self {
+        Self::of_arg(std::env::args().nth(1).as_deref()).unwrap_or_else(|| {
+            match std::env::var("ONE_CLIENT").as_deref() {
+                Ok("desktop") => Self::Desktop,
+                _ => Self::Pet,
+            }
+        })
+    }
+
+    fn of_arg(arg: Option<&str>) -> Option<Self> {
+        match arg {
+            Some("--client=desktop") | Some("desktop") => Some(Self::Desktop),
+            Some("--client=pet") | Some("pet") => Some(Self::Pet),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pet => "ONE 宠物",
+            Self::Desktop => "ONE 桌面端",
+        }
+    }
+
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Pet => "pet",
+            Self::Desktop => "desktop",
+        }
+    }
+
+    /// What this client offers to the others through core. These names are the
+    /// only contract between two clients; core matches them as plain strings.
+    fn capabilities(self) -> &'static [&'static str] {
+        match self {
+            Self::Pet => &["pet.state", "pet.bubble.open", "pet.show", "pet.hide"],
+            Self::Desktop => &[
+                "desktop.state",
+                "desktop.window.show",
+                "desktop.window.hide",
+                "desktop.launch.pet",
+            ],
+        }
+    }
+
+    /// The window this client opens for itself. One client, one window; the pet
+    /// is the only one that also owns the conversation strip.
+    fn primary_window(self) -> &'static str {
+        match self {
+            Self::Pet => PET,
+            Self::Desktop => MAIN,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Rect {
@@ -59,21 +163,18 @@ fn show_bubble(app: &AppHandle) -> Result<(), String> {
         .ok_or("bubble window is missing")?;
     bubble.show().map_err(|error| error.to_string())?;
     if let Some(pet) = app.get_webview_window(PET) {
-        let pet_rect = pet
-            .outer_position()
-            .and_then(|position| {
-                pet.outer_size().map(|size| Rect {
-                    x: position.x,
-                    y: position.y,
-                    width: size.width as i32,
-                    height: size.height as i32,
-                })
+        let pet_rect = pet.outer_position().ok().and_then(|position| {
+            pet.outer_size().ok().map(|size| Rect {
+                x: position.x,
+                y: position.y,
+                width: size.width as i32,
+                height: size.height as i32,
             })
-            .ok();
+        });
         let bubble_size = bubble
             .outer_size()
-            .map(|size| (size.width as i32, size.height as i32))
-            .ok();
+            .ok()
+            .map(|size| (size.width as i32, size.height as i32));
         if let (Some(pet_rect), Some((width, height))) = (pet_rect, bubble_size) {
             if width > 0 && height > 0 {
                 let work = pet
@@ -129,6 +230,14 @@ fn open_main(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn hide_main(app: AppHandle) -> Result<(), String> {
+    app.get_webview_window(MAIN)
+        .ok_or("main window is missing")?
+        .hide()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn open_bubble(app: AppHandle) -> Result<(), String> {
     show_bubble(&app).inspect_err(|error| eprintln!("one: open_bubble failed: {error}"))
 }
@@ -142,25 +251,6 @@ fn hide_bubble(app: AppHandle) -> Result<(), String> {
             eprintln!("one: hide_bubble failed: {error}");
             error.to_string()
         })
-}
-
-/// Lets the frontend catch a renamed or missing command instead of silently
-/// doing nothing: every invoke that fails is otherwise invisible to the user.
-#[tauri::command]
-fn shell_commands() -> Vec<&'static str> {
-    vec![
-        "open_main",
-        "open_bubble",
-        "hide_bubble",
-        "hide_pet",
-        "show_pet",
-        "popup_pet_menu",
-        "start_drag",
-        "move_window",
-        "quit_app",
-        "force_quit",
-        "shell_commands",
-    ]
 }
 
 #[tauri::command]
@@ -211,31 +301,99 @@ fn popup_pet_menu(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
     if window.label() != PET {
         return Err("only the pet window shows the pet menu".into());
     }
-    let open_item = MenuItem::with_id(&app, "open_main", "打开 ONE", true, None::<&str>)
-        .map_err(|error| error.to_string())?;
-    let bubble_item =
-        MenuItem::with_id(&app, "open_bubble", "打开小聊天框", true, None::<&str>)
-            .map_err(|error| error.to_string())?;
-    let hide_item =
-        MenuItem::with_id(&app, "hide_pet", "隐藏宠物", true, None::<&str>)
-            .map_err(|error| error.to_string())?;
-    let quit_item = MenuItem::with_id(&app, "quit", "退出", true, None::<&str>)
-        .map_err(|error| error.to_string())?;
-    let separator = PredefinedMenuItem::separator(&app).map_err(|error| error.to_string())?;
-    let menu = Menu::with_items(
-        &app,
-        &[&open_item, &bubble_item, &hide_item, &separator, &quit_item],
-    )
-    .map_err(|error| error.to_string())?;
+    let menu = pet_menu(&app).map_err(|error| error.to_string())?;
     window
         .popup_menu(&menu)
         .map_err(|error| error.to_string())
 }
 
+/// Lets the frontend catch a renamed or missing command instead of silently
+/// doing nothing: every invoke that fails is otherwise invisible to the user.
 #[tauri::command]
-fn quit_app(app: AppHandle) -> Result<(), String> {
-    // Give the host window a chance to stop running work before we exit.
-    if let Some(main) = app.get_webview_window(MAIN) {
+fn shell_commands() -> Vec<&'static str> {
+    vec![
+        "open_main",
+        "hide_main",
+        "open_bubble",
+        "hide_bubble",
+        "hide_pet",
+        "show_pet",
+        "popup_pet_menu",
+        "start_drag",
+        "move_window",
+        "client_identity",
+        "core_status",
+        "core_send",
+        "core_answer",
+        "core_start",
+        "core_hello",
+        "quit_app",
+        "force_quit",
+        "shell_commands",
+    ]
+}
+
+/// Which client this process is, and which window is asking. The renderer asks
+/// the shell instead of guessing from the URL: both clients load the same page.
+#[tauri::command]
+fn client_identity(
+    window: WebviewWindow,
+    link: State<'_, core_link::CoreLink>,
+    client: State<'_, ClientKind>,
+) -> Value {
+    let status = link.status();
+    json!({
+        "kind": status.kind,
+        "label": status.label,
+        "capabilities": status.capabilities,
+        "wireVersion": status.wire_version,
+        "window": window.label(),
+        "primaryWindow": client.primary_window,
+    })
+}
+
+#[tauri::command]
+fn core_status(link: State<'_, core_link::CoreLink>) -> core_link::CoreStatus {
+    link.status()
+}
+
+/// 把 webview 的命令转成协议帧发给本体；本体只认白名单命令。
+#[tauri::command]
+fn core_send(link: State<'_, core_link::CoreLink>, frame: Value) -> Result<(), String> {
+    core_link::send_frame(&link, frame)
+}
+
+/// 客户端暴露自己的能力，供另一个客户端通过本体调用。
+#[tauri::command]
+fn core_answer(link: State<'_, core_link::CoreLink>, frame: Value) -> Result<(), String> {
+    core_link::send_frame(&link, frame)
+}
+
+/// 第一帧由 webview 发送；这里只把它组装出来，握手时机仍由 webview 决定。
+#[tauri::command]
+fn core_hello(link: State<'_, core_link::CoreLink>) -> Value {
+    let status = link.status();
+    json!({
+        "t": "hello",
+        "v": status.wire_version,
+        "client": {
+            "kind": status.kind,
+            "label": status.label,
+            "capabilities": status.capabilities,
+        },
+    })
+}
+
+/// 启动本体。宠物是默认安装的那个客户端，但两端都需要它活着。
+#[tauri::command]
+fn core_start() -> Result<(), String> {
+    core_link::start_core()
+}
+
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    let main = app.get_webview_window(MAIN);
+    if let Some(main) = main {
         if main.is_visible().unwrap_or(false) {
             let _ = app.emit_to(MAIN, BEFORE_QUIT, ());
         }
@@ -245,7 +403,6 @@ fn quit_app(app: AppHandle) -> Result<(), String> {
         std::thread::sleep(QUIT_GRACE);
         fallback.exit(0);
     });
-    Ok(())
 }
 
 #[tauri::command]
@@ -253,41 +410,200 @@ fn force_quit(app: AppHandle) {
     app.exit(0);
 }
 
+/// 客户端不共用窗口，但都加载同一份前端。窗口不再写死在 tauri.conf.json 里，
+/// 因此这里必须显式指向应用入口：`WebviewUrl::default()` 在没有预配置窗口时
+/// 不会解析出可用的地址，开发版能开、发布版只会得到一个"无法访问此页面"。
+fn app_url() -> WebviewUrl {
+    WebviewUrl::App("index.html".into())
+}
+
+fn build_pet_windows(app: &AppHandle) -> Result<(), String> {
+    let pet = WebviewWindowBuilder::new(app, PET, app_url())
+        .title("ONE")
+        .inner_size(128.0, 128.0)
+        .transparent(true)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .shadow(false)
+        .build()
+        .map_err(|error| error.to_string())?;
+    WebviewWindowBuilder::new(app, BUBBLE, app_url())
+        .title("ONE")
+        .inner_size(380.0, 168.0)
+        .visible(false)
+        // 对话条是浮在桌面上的一条，不是窗口：系统标题栏和菜单栏都不该出现，
+        // 关闭和移动由条上的 ✕ 与握把负责。
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .shadow(false)
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    if let Ok(Some(monitor)) = pet.primary_monitor() {
+        let area = monitor.work_area();
+        let size = pet
+            .outer_size()
+            .map(|value| (value.width as i32, value.height as i32))
+            .unwrap_or((128, 128));
+        let x = area.position.x + area.size.width as i32 - size.0 - 48;
+        let y = area.position.y + area.size.height as i32 - size.1 - 48;
+        let _ = pet.set_position(PhysicalPosition::new(x, y));
+    }
+    Ok(())
+}
+
+fn build_desktop_window(app: &AppHandle) -> Result<(), String> {
+    WebviewWindowBuilder::new(app, MAIN, app_url())
+        .title("ONE")
+        .inner_size(1200.0, 820.0)
+        .min_inner_size(760.0, 600.0)
+        .build()
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn build_windows(app: &AppHandle, client: ClientKindArg) -> Result<(), String> {
+    match client {
+        ClientKindArg::Pet => build_pet_windows(app),
+        ClientKindArg::Desktop => build_desktop_window(app),
+    }
+}
+
+/// The pet's menu, defined once: the window menu for keyboard access and the
+/// right-click popup have to stay the same list, or one of them quietly goes
+/// missing. A client never spawns another one directly — launching goes through
+/// core, the only thing that knows what is installed.
+fn pet_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let launch = MenuItem::with_id(app, LAUNCH_DESKTOP, "打开 ONE 桌面端", true, None::<&str>)?;
+    let restart = MenuItem::with_id(app, RESTART_CORE, "重新启动 ONE 本体", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, QUIT, "退出", true, None::<&str>)?;
+    Menu::with_items(app, &[&launch, &restart, &quit])
+}
+
+fn desktop_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let launch = MenuItem::with_id(app, LAUNCH_PET, "启动 ONE 宠物", true, None::<&str>)?;
+    let bubble = MenuItem::with_id(app, PET_BUBBLE, "呼出宠物对话条", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, PET_SHOW, "显示宠物", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, QUIT, "退出", true, None::<&str>)?;
+    Menu::with_items(app, &[&launch, &bubble, &show, &quit])
+}
+
+/// Only the window a client owns itself carries the window menu. Setting it on
+/// the app would paint a menu bar inside every window — including the pet's
+/// conversation strip, which is a floating bar and must stay frameless.
+fn install_menu(app: &AppHandle, client: ClientKindArg) -> tauri::Result<()> {
+    let window = app.get_webview_window(ClientKind::of(client).primary_window);
+    let menu = match client {
+        ClientKindArg::Pet => pet_menu(app)?,
+        ClientKindArg::Desktop => desktop_menu(app)?,
+    };
+    window
+        .map(|window| window.set_menu(menu).map(|_| ()))
+        .unwrap_or(Ok(()))
+}
+
+fn shell_request_id(app: &AppHandle) -> String {
+    match app.try_state::<core_link::CoreLink>() {
+        Some(link) => link.next_shell_request(),
+        None => "shell-unavailable".to_string(),
+    }
+}
+
+fn launch_through_core(app: &AppHandle, kind: &str) {
+    if let Err(error) = core_link::start_core() {
+        eprintln!("one: 无法启动本体：{error}");
+    }
+    let frame = json!({ "t": "clients.launch", "id": shell_request_id(app), "kind": kind });
+    if let Err(error) = core_link::send_command(app, frame) {
+        eprintln!("one: 请本体拉起 {kind} 失败：{error}");
+    }
+}
+
+fn call_pet_through_core(app: &AppHandle, capability: &str) {
+    let frame = json!({
+        "t": "capability.call",
+        "id": shell_request_id(app),
+        "target": "pet",
+        "capability": capability,
+    });
+    if let Err(error) = core_link::send_command(app, frame) {
+        eprintln!("one: 请宠物执行 {capability} 失败：{error}");
+    }
+}
+
+/// The window this client opens for itself. One client, one window; the pet
+/// is the only one that also owns the conversation strip.
+#[derive(Clone, Copy)]
+struct ClientKind {
+    wire_name: &'static str,
+    label: &'static str,
+    capabilities: &'static [&'static str],
+    primary_window: &'static str,
+}
+
+impl ClientKind {
+    fn of(client: ClientKindArg) -> Self {
+        Self {
+            wire_name: client.wire_name(),
+            label: client.label(),
+            capabilities: client.capabilities(),
+            primary_window: client.primary_window(),
+        }
+    }
+}
+
 fn main() {
+    let client = ClientKindArg::parse();
+    let identity = ClientKind::of(client);
+
     tauri::Builder::default()
-        .setup(|app| {
-            if let Some(pet) = app.get_webview_window(PET) {
-                // Default to the bottom-right corner of the monitor work area.
-                if let Ok(Some(monitor)) = pet.primary_monitor() {
-                    let area = monitor.work_area();
-                    let size = pet
-                        .outer_size()
-                        .map(|value| (value.width as i32, value.height as i32))
-                        .unwrap_or((128, 128));
-                    let x = area.position.x + area.size.width as i32 - size.0 - 48;
-                    let y = area.position.y + area.size.height as i32 - size.1 - 48;
-                    let _ = pet.set_position(PhysicalPosition::new(x, y));
-                }
+        .manage(identity)
+        .setup(move |app| {
+            let handle = app.handle().clone();
+            // 顺序很重要：先装好本体桥接，再开窗。窗口一创建，页面就会立刻调用
+            // 壳命令；发布版资源是内嵌的，加载比开发版快得多，桥接晚一步就
+            // 会让界面拿到 "state not managed"，然后整页空白。
+            core_link::start_bridge(
+                &handle,
+                identity.wire_name,
+                identity.label,
+                identity.capabilities,
+                WIRE_VERSION,
+            );
+            if let Err(error) = build_windows(&handle, client) {
+                eprintln!("one: 创建客户端窗口失败：{error}");
+                return Err(error.into());
             }
-            app.on_menu_event(|app, event| match event.id().as_ref() {
-                "open_main" => {
-                    let _ = open_main(app.clone());
+            if let Err(error) = install_menu(&handle, client) {
+                eprintln!("one: 安装菜单失败：{error}");
+            }
+            // 本体是默认安装的那一半：客户端保证它活着，重连循环负责接上。
+            if let Err(error) = core_link::start_core() {
+                eprintln!("one: 本体没有启动，界面会显示未连接：{error}");
+            }
+            app.on_menu_event(|app, event| match menu_action(event.id().as_ref()) {
+                Some(MenuAction::Launch(kind)) => launch_through_core(app, kind),
+                Some(MenuAction::RestartCore) => {
+                    if let Err(error) = core_link::start_core() {
+                        eprintln!("one: 本体没有启动：{error}");
+                    }
                 }
-                "open_bubble" => {
-                    let _ = show_bubble(app);
+                Some(MenuAction::PetCapability(capability)) => {
+                    call_pet_through_core(app, capability)
                 }
-                "hide_pet" => {
-                    let _ = hide_pet(app.clone());
-                }
-                "quit" => {
-                    let _ = quit_app(app.clone());
-                }
-                _ => {}
+                Some(MenuAction::Quit) => quit_app(app.clone()),
+                None => {}
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             open_main,
+            hide_main,
             open_bubble,
             hide_bubble,
             hide_pet,
@@ -295,22 +611,18 @@ fn main() {
             start_drag,
             move_window,
             popup_pet_menu,
+            client_identity,
+            core_status,
+            core_send,
+            core_answer,
+            core_hello,
+            core_start,
             quit_app,
             force_quit,
             shell_commands
         ])
-        .on_window_event(|window, event| {
-            // Closing the host window ends the session: the pet and bubble have
-            // no state of their own and must not outlive the authority.
-            if window.label() == MAIN {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    let _ = quit_app(window.app_handle().clone());
-                }
-            }
-        })
         .run(tauri::generate_context!())
-        .expect("failed to run ONE desktop shell");
+        .expect("failed to run ONE client");
 }
 
 #[cfg(test)]
@@ -356,29 +668,13 @@ mod tests {
 
     #[test]
     fn clamps_a_pet_that_was_dragged_off_the_right_edge() {
-        let work = Rect {
-            x: 0,
-            y: 0,
-            width: 1280,
-            height: 800,
-        };
+        let work = Rect { x: 0, y: 0, width: 1280, height: 800 };
         let (x, y) = place_bubble(
-            Rect {
-                x: 1260,
-                y: 600,
-                width: 128,
-                height: 128,
-            },
-            Rect {
-                x: 0,
-                y: 0,
-                width: 380,
-                height: 168,
-                },
+            Rect { x: 1260, y: 600, width: 128, height: 128 },
+            Rect { x: 0, y: 0, width: 380, height: 168 },
             work,
             12,
         );
-        // The bubble would hang off the right edge, so it is pulled back inside.
         assert_eq!(x, 900);
         assert_eq!(y, 420);
     }
@@ -392,5 +688,47 @@ mod tests {
             12,
         );
         assert_eq!((x, y), (0, 32));
+    }
+
+    #[test]
+    fn every_menu_item_the_menus_declare_has_a_handler() {
+        // 菜单项加上去却没接线的后果是"点了没反应"，用户看不出是坏了还是没用。
+        for id in [
+            LAUNCH_DESKTOP,
+            LAUNCH_PET,
+            RESTART_CORE,
+            PET_BUBBLE,
+            PET_SHOW,
+            QUIT,
+        ] {
+            assert!(menu_action(id).is_some(), "菜单项 {id} 没有对应动作");
+        }
+        assert_eq!(menu_action("没有这个菜单项"), None);
+    }
+
+    #[test]
+    fn every_client_kind_declares_its_own_capabilities() {
+        // 能力名是客户端之间唯一的契约面，不能重名，也不能借用对方的。
+        let pet = ClientKindArg::Pet.capabilities();
+        let desktop = ClientKindArg::Desktop.capabilities();
+        assert!(pet.iter().all(|item| item.starts_with("pet.")));
+        assert!(desktop.iter().all(|item| item.starts_with("desktop.")));
+        assert!(!pet.iter().any(|item| desktop.contains(item)));
+    }
+
+    #[test]
+    fn each_client_owns_its_own_primary_window() {
+        // 客户端互不共享窗口：桌面端没有宠物窗口，宠物也没有主窗口。
+        assert_eq!(ClientKindArg::Pet.primary_window(), PET);
+        assert_eq!(ClientKindArg::Desktop.primary_window(), MAIN);
+    }
+
+    #[test]
+    fn the_client_kind_is_carried_by_env_or_arg_not_by_a_url() {
+        // tauri dev 传不进命令行参数，所以两种传法必须指向同一个客户端种类。
+        assert_eq!(ClientKindArg::of_arg(Some("--client=desktop")), Some(ClientKindArg::Desktop));
+        assert_eq!(ClientKindArg::of_arg(Some("desktop")), Some(ClientKindArg::Desktop));
+        assert_eq!(ClientKindArg::of_arg(Some("--client=pet")), Some(ClientKindArg::Pet));
+        assert_eq!(ClientKindArg::of_arg(Some("whatever")), None);
     }
 }

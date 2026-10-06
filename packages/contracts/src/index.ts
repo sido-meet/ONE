@@ -5,10 +5,11 @@ import type {
   DeleteResult,
   Note,
   NotePage,
-} from './domain';
+} from './domain.ts';
 
-export * from './errors';
-export * from './domain';
+export * from './errors.ts';
+export * from './domain.ts';
+export * from './wire.ts';
 
 /** ONE-owned identities; external agent sessions are never conversation IDs. */
 export type AgentId = 'chat' | 'claude-code' | 'mcode';

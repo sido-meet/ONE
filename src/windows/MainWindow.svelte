@@ -2,16 +2,17 @@
   import { onMount } from 'svelte';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import type { AgentId } from '../../packages/contracts/src';
-  import { client, windowLabel } from '../lib/client';
-  import { shell } from '../lib/tauri';
-  import { HOST_BEFORE_QUIT } from '../lib/protocol';
+  import { client, link } from '../lib/client';
+  import { shell, listenBeforeQuit } from '../lib/tauri';
 
+  // 本轮范围：桌面端只保证"能独立接上本体、不假装有功能"，交互打磨放到后面。
   let snapshot = $state(client.getSnapshot());
   let selectedId = $state('welcome');
   let page = $state<'chat' | 'plan'>('chat');
   let input = $state('');
   let error = $state('');
-  let petVisible = $state(true);
+  let coreState = $state(link.state());
+
   const agents: { id: AgentId; name: string }[] = [
     { id: 'chat', name: 'Chat Agent' },
     { id: 'claude-code', name: 'Claude Code' },
@@ -30,32 +31,33 @@
   );
   const agentName = (id: AgentId) =>
     agents.find((agent) => agent.id === id)?.name ?? id;
-  onMount(() =>
-    client.subscribe(() => {
-      snapshot = client.getSnapshot();
-    }),
-  );
-  /**
-   * Quitting stops what is running before the process goes away. The shell falls
-   * back to a forced exit if this window cannot answer, so it never hangs.
-   */
+
   onMount(() => {
-    if (windowLabel !== 'main') return;
+    const stop = client.subscribe(() => {
+      snapshot = client.getSnapshot();
+    });
+    const stopLink = link.subscribe(() => {
+      coreState = link.state();
+    });
+    return () => {
+      stop();
+      stopLink();
+    };
+  });
+
+  onMount(() => {
     const stopRunningWork = async () => {
       const running = client
         .getSnapshot()
         .runs.filter((run) => run.status === 'running');
       await Promise.all(running.map((run) => client.cancelRun(run.id)));
     };
-    const beforeQuit = getCurrentWebviewWindow().listen(
-      HOST_BEFORE_QUIT,
-      () => {
-        void (async () => {
-          await stopRunningWork();
-          await shell.forceQuit();
-        })();
-      },
-    );
+    const stopBeforeQuit = listenBeforeQuit(() => {
+      void (async () => {
+        await stopRunningWork();
+        await shell.forceQuit();
+      })();
+    });
     const closeRequested = getCurrentWebviewWindow().onCloseRequested(
       (event) => {
         event.preventDefault();
@@ -63,10 +65,11 @@
       },
     );
     return () => {
-      void beforeQuit.then((stop) => stop());
+      void stopBeforeQuit.then((stop) => stop());
       void closeRequested.then((stop) => stop());
     };
   });
+
   async function act(action: () => Promise<unknown>) {
     error = '';
     try {
@@ -75,6 +78,7 @@
       error = cause instanceof Error ? cause.message : '操作失败，请重试';
     }
   }
+
   async function send() {
     if (!input.trim()) return;
     await act(async () => {
@@ -82,6 +86,7 @@
       input = '';
     });
   }
+
   async function create() {
     await act(async () => {
       selectedId = (await client.createConversation()).id;
@@ -100,7 +105,8 @@
         page = 'chat';
       }}
       aria-label="ONE 首页"
-      ><span class="brand-symbol">o</span> ONE<span class="version">0.0.1</span
+      ><span class="brand-symbol">o</span> ONE<span class="version"
+        >0.2.0-dev</span
       ></a
     >
     <div class="space-label">个人空间 <span>LOCAL</span></div>
@@ -127,28 +133,6 @@
           page = 'plan';
         }}>◈ <span>项目起点</span><span class="arrow">↗</span></button
       >
-      <div class="pet-tools">
-        <p class="section-label">桌面入口</p>
-        <button
-          onclick={() =>
-            act(async () => {
-              await shell.openBubble();
-            })}>打开小聊天框</button
-        >
-        {#if petVisible}<button
-            onclick={() =>
-              act(async () => {
-                await shell.hidePet();
-                petVisible = false;
-              })}>隐藏宠物</button
-          >{:else}<button
-            onclick={() =>
-              act(async () => {
-                await shell.showPet();
-                petVisible = true;
-              })}>显示宠物</button
-          >{/if}
-      </div>
       <p>一个对话，持续生长。</p>
     </div>
   </aside>
@@ -159,19 +143,19 @@
         ONE <span>/</span>
         {page === 'chat' ? '对话' : '项目起点'}
       </div>
-      <span class="demo-badge"><span></span> 交互原型 · 模拟数据</span>
+      <span class="demo-badge"><span></span> 桌面端客户端 · 本轮未打磨</span>
     </header>
     {#if page === 'chat'}
       <section class="chat-heading">
         <div>
           <p class="eyebrow">YOUR CONVERSATION, YOURS TO KEEP</p>
-          <h1>{conversation?.title}</h1>
+          <h1>{conversation?.title ?? '正在连接 ONE 本体…'}</h1>
         </div>
         <label class="agent-picker"
           >当前 Agent
           <select
             value={conversation?.agentId}
-            disabled={!!activeRun}
+            disabled={!!activeRun || coreState !== 'ready'}
             onchange={(event) =>
               act(() =>
                 client.changeAgent(
@@ -187,7 +171,18 @@
         </label>
       </section>
       <div class="chat-body" aria-label="聊天记录">
-        {#if events.length === 0}
+        {#if coreState !== 'ready'}
+          <div class="welcome">
+            <p class="eyebrow">ONE 本体</p>
+            <h2>
+              {coreState === 'rejected' ? '协议不兼容' : '还没有连上 ONE 本体'}
+            </h2>
+            <p>
+              {link.problem() ||
+                '本体没有运行或还没接受这个客户端，这里不显示假数据。'}
+            </p>
+          </div>
+        {:else if events.length === 0}
           <div class="welcome">
             <div class="orb" aria-hidden="true"><span></span><span></span></div>
             <p class="eyebrow">MEET ONE</p>
@@ -196,18 +191,6 @@
               让对话留在这里，让不同的 Agent 接力。<br />先试着聊一句，感受 ONE
               的第一步。
             </p>
-            <div class="suggestions">
-              <button
-                onclick={() => {
-                  input = '一起规划我的 ONE 项目';
-                }}>一起规划我的 ONE 项目 <span>↗</span></button
-              >
-              <button
-                onclick={() => {
-                  input = '解释一下：对话如何跨 Agent 保留？';
-                }}>了解对话与 Agent <span>↗</span></button
-              >
-            </div>
           </div>
         {/if}
         {#each events as event (event.id)}
@@ -259,6 +242,7 @@
             placeholder="告诉 ONE，你在想什么…"
             rows="2"
             maxlength="8000"
+            disabled={coreState !== 'ready'}
             onkeydown={(event) => {
               if (
                 event.key === 'Enter' &&
@@ -279,13 +263,15 @@
                 onclick={() => act(() => client.cancelRun(activeRun!.id))}
                 >停止回复 ■</button
               >
-            {:else}<button class="send" type="submit" disabled={!input.trim()}
-                >发送 ↑</button
+            {:else}<button
+                class="send"
+                type="submit"
+                disabled={!input.trim() || coreState !== 'ready'}>发送 ↑</button
               >{/if}
           </div>
         </form>
         <p class="footnote">
-          当前为本地模拟体验，刷新后清空。Claude Code 与 MCode 尚未连接。
+          这个窗口是本体的一个呈现形式，对话不在这里。回复仍是本地模拟。
         </p>
       </div>
     {:else}
@@ -293,29 +279,25 @@
         <p class="eyebrow">BUILD ONE, STEP BY STEP</p>
         <h1>先让想法变得可体验。</h1>
         <p class="plan-intro">
-          ONE 的起点已经准备好。每一层能力，都围绕同一个对话逐步生长。
+          ONE
+          本体已经独立，宠物端本轮做完；桌面端先能独立接上本体，交互后面再补。
         </p>
         <div class="milestones">
           <article>
-            <span class="step">00 / 已准备</span>
-            <h2>项目基础</h2>
-            <p>开发文档、类型契约、模拟对话、测试与桌面壳配置。</p>
+            <span class="step">00 / 已完成</span>
+            <h2>ONE 本体</h2>
+            <p>独立进程持有唯一状态，客户端通过命名管道接入。</p>
           </article>
           <article>
-            <span class="step">01 / 下一步</span>
-            <h2>让 ONE 活起来</h2>
-            <p>桌面宠物、小聊天框，以及日历和笔记的完整模拟交互。</p>
+            <span class="step">01 / 进行中</span>
+            <h2>宠物端</h2>
+            <p>桌面上的一根对话条与一朵状态云，全部状态来自本体。</p>
           </article>
           <article>
-            <span class="step">02 / 后续</span>
-            <h2>连接真实能力</h2>
-            <p>本地保存、真实模型、Agent 接力与统一的工具调用。</p>
+            <span class="step">02 / 计划</span>
+            <h2>桌面端打磨</h2>
+            <p>与宠物互调、窗口管理、完整的客户端联动界面。</p>
           </article>
-        </div>
-        <div class="principle">
-          <span>ONE PRINCIPLE</span>
-          <h2>对话属于你。<br />Agent 是参与者。</h2>
-          <p>切换的是处理对话的能力，保留的是你的目标、历史与工作成果。</p>
         </div>
         <p class="footnote">
           完整规划位于项目 README.md 与 docs/ 目录。此页用于说明开发阶段。

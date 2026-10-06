@@ -10,38 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "label": "main",
-        "title": "ONE",
-        "width": 1200,
-        "height": 820,
-        "minWidth": 760,
-        "minHeight": 600
-      },
-      {
-        "label": "pet",
-        "title": "ONE",
-        "width": 128,
-        "height": 128,
-        "transparent": true,
-        "decorations": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "resizable": false,
-        "shadow": false
-      },
-      {
-        "label": "bubble",
-        "title": "ONE",
-        "width": 380,
-        "height": 168,
-        "visible": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "resizable": false
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost"
     }

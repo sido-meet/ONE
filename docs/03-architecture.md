@@ -2,64 +2,77 @@
 
 ## 本次落地与长期方向
 
-当前落地：Svelte 5 + TypeScript + Vite；OneClient 与内存 MockRuntime；Tauri v2 的 main / pet / bubble 三窗口；main 窗口内的薄状态代理。无业务后端、数据库、真实模型或插件加载器。
+当前落地：**ONE 本体（core）独立进程 + 两个对等客户端**。本体用 Node 跑 `core/src/index.ts`，在 Windows 命名管道 `\\.\pipe\one-core` 上服务逐行 JSON；宠物与桌面端各自是一个 Tauri 客户端，窗口按客户端种类动态创建，都加载同一份前端；Rust 壳是 webview 与本体之间唯一的可信边界。状态只有一份，在本体里。
 
-目标方向：Rust/Tauri 负责原生窗口与可信系统能力，TypeScript Runtime 负责会话、运行、上下文投影和能力编排。采用本地单体加受控外部进程，不做微服务。
+尚未落地：真实模型、真实 Agent、数据库、插件加载器、日历笔记界面。回复仍来自内存 MockRuntime。
+
+目标方向不变：Rust/Tauri 负责原生窗口与可信系统能力，TypeScript Runtime 负责会话、运行、上下文投影和能力编排。本地单体加受控外部进程，不做微服务。
 
 ```mermaid
 flowchart TB
-  UI[Pet / Bubble / Main · Svelte] --> Client[OneClient]
-  Client --> Mock[MockRuntime · 当前]
-  Client -.后续.-> IPC[Native IPC adapter]
-  IPC --> Host[Rust Trusted Host]
-  Host --> Runtime[TypeScript Runtime sidecar]
-  Runtime --> Domain[Calendar / Notes Domain Services]
-  Runtime --> Connector[Agent Connector]
+  subgraph clients["客户端（对等、可插拔、都是本地呈现）"]
+    Pet[宠物客户端<br/>pet + bubble 窗口]
+    Desk[桌面端客户端<br/>main 窗口]
+    Cli[命令行客户端]
+  end
+  subgraph shell["Rust 壳 · 唯一可信边界"]
+    Tauri[Tauri 壳<br/>窗口、菜单、管道读写]
+  end
+  Core[ONE 本体 · 独立进程<br/>权威状态 / 客户端名册 / 能力转发]
+  Mock[MockRuntime · 当前]
+
+  Pet --> Tauri
+  Desk --> Tauri
+  Cli --> Core
+  Tauri --> Core
+  Core --> Mock
+  Core -.未来.-> Domain[日历 / 笔记领域服务]
+  Core -.未来.-> Connector[Agent Connector]
   Connector --> Agent[外部 Agent 进程或 SDK]
-  Host --> DB[SQLite / Secret Store / Process supervisor]
   MCP[MCP Adapter] --> Domain
 ```
 
-此图为目标依赖方向；只有 UI/Client/Mock 与壳配置已落地。Tauri WebView 不提供 Node.js Runtime，不能直接在 Svelte 中 import Node 进程或 SDK 代码。
+## 进程与部署决策（ADR-013 / 014 / 015）
 
-## 进程与部署决策
+**已实现的形态**。本体持有唯一 `OneClient`、权威快照、客户端名册与安装清单。宠物、桌面端、命令行是对等的客户端：连上来、握手声明能力、收状态，彼此没有父子关系。`tauri.conf.json` 不再声明任何窗口，窗口在 `setup` 里按客户端种类创建，因此"默认安装的是宠物，桌面端可选"在架构上成立，而不是靠两个 exe 硬凑。
 
-0.1 单窗口浏览器原型在同一 JS 进程使用内存 MockClient。Tauri 多窗口阶段引入薄 NativeHost 状态代理：主 WebView 保持隐藏存活并持有 MockClient，其他窗口发带 requestId 的命令给主窗口，由主窗口广播带 revision 的快照。新增窗口先请求快照；旧 revision 丢弃；主窗口失效则显示“原型服务不可用”。窗口 ID 和命令白名单由可信壳核验。这是仅供 0.1 的过渡方案，不能直接用于真实 Agent。
+- **传输**：Windows 命名管道 + 版本化逐行 JSON，一帧一行，1MB 上限（`packages/contracts/src/wire.ts` 是协议唯一真相源，前后端与本体都从它生成/校验）。不占端口、不需要额外鉴权，同机其他程序也连不上。多客户端不能用 stdio（1 对 1），命名管道是既定选择。
+- **能力调用**：客户端之间不直接 spawn。需要请另一个客户端做事时，经本体转发（`capability.call` → `invoke` → `capability.result`），目标由能力名寻址。只有本体知道装了什么（`clients.list` 返回 `installed` 与 `connected`），所以"没装 / 没运行"都能给出明确错误而不是静默失败。0.1 用 `ONE_INSTALLED` 环境变量代替安装器。
+- **窗口菜单**：`app.set_menu` 会在每个窗口客户区画一条菜单栏，宠物对话条必须无边框，因此菜单只挂在客户端自己的主窗口上。宠物的右键菜单与窗口菜单共用同一个 `pet_menu()`，避免两处清单走偏（这个坑已经踩过一次：右键只剩"退出"）。
 
-**已实现的 0.1 形态**（`src/lib/`）：`client.ts` 是唯一装配点，按窗口标签选择角色——main 窗口持有唯一的 MockClient 并包成 `host.ts`，pet/bubble 得到 `proxy-client.ts`。协议见 `protocol.ts`：命令名白名单、`requestId` 回执、带 `revision` 的快照广播、陈旧 revision 丢弃、8 秒请求超时后标记 `unavailable`，`transport.ts` 让这套逻辑可在无桌面环境单测。与最初设想的差别有三点，均为已知取舍：
+**踩过的坑，改架构时不要退回去**：
 
-- main 窗口同时可见并持有权威状态，而不是"隐藏存活"。宠物与小窗都依赖它，用户看得见反而更容易理解状态归属。
-- 窗口操作不经过 JS window API，而是 `invoke` 到 Rust 壳（`tauri.ts` → `main.rs`），由壳决定窗口能做什么。命令名白名单在 host 侧执行，但发送方标签无法在 v2 事件里回溯，因此"身份核验"目前只到命令名层面；出现不可信窗口或插件前必须补齐。命令名对不上时 `invoke` 只会 reject 并被 `void` 吞掉，因此壳额外提供 `shell_commands`，开发态启动时比对前端用到的命令名并在控制台报错。
-- 窗口拖动必须在窗口所属线程发起，因此 `start_drag` 通过 `run_on_main_thread` 投递；命令体本身跑在异步线程上，直接调用会静默失效。另提供 `move_window` 作为键盘等价的移动方式。
-- 每次 token 增量都广播整份快照，这是原型代价；0.2 换sidecar 时必须改成有长度边界的增量帧。
+- **壳的管道读写不能共用一个文件对象。** 写入句柄是 `File::try_clone()` 出来的，而 Windows 上 `try_clone` 走 `DuplicateHandle` —— 两个句柄指向同一个文件对象，同步 I/O 在文件对象上是串行化的。只要读取线程停在 `ReadFile` 等数据，写端的 `write_all` 就永远排队；而本体在收到第一帧之前不会主动说话，两边互等到死锁。症状是"客户端连上了管道但永远完不成握手"。现在读端用 `PeekNamedPipe` 轮询，没有数据就让出文件对象（`core_link.rs`）。任何新的管道读写代码都必须遵守这一点。
+- **Tauri 命令的注册顺序即契约。** `start_bridge` 必须早于 `build_windows`：发布版资源是内嵌的，加载比开发版快得多，桥接晚一步界面就会拿到 `state not managed` 然后整页空白。开发态被 vite 的慢启动掩盖了这个竞态。
+- **发布版必须用 `pnpm desktop:build`。** 直接 `cargo build --release` 不会重新嵌入前端资源，会得到一个打不开的页面。
+- **客户端种类有两条通道**：`--client=` 给已构建的 exe，`ONE_CLIENT` 环境变量给 `tauri dev`（Tauri CLI 会把 `--client=pet` 错位传给 cargo）。
 
-0.2 之后权威状态移入唯一 Runtime sidecar。Rust 启动、监控和终止该进程；用有长度边界的 JSON 消息或逐行 JSON 协议经 stdio 通信，协议日志只走 stderr。要求 requestId、协议版本、超时、帧大小上限、取消与启动握手；不默认暴露本地 HTTP 监听端口。
+**尚未解决**：`R02` 打包。TypeScript 不能直接作为可执行文件分发，而本体现在是靠系统里的 `node` 跑源码。验证目标三元组、体积、杀毒误报、进程清理、SDK 动态依赖；方案定下来前不冻结产物布局。壳启动本体时用 `ONE_REPO_ROOT` → 编译期 `CARGO_MANIFEST_DIR` 向上遍历定位仓库，并在拉起时边跑边转发本体 stderr。
 
-TypeScript 不能直接作为可执行文件分发。R02 必须做打包实验：比较“携带固定 Node Runtime + 编译 JS”与支持的单文件可执行打包。验证目标三元组、体积、杀毒误报、进程清理、SDK 动态依赖。方案验证成功后再冻结产物布局。Tauri 支持外部二进制的集成方式，见[官方 sidecar 文档](https://tauri.app/develop/sidecar/)。
-
-首版持久化由 Rust 数据服务独占 SQLite 写入，TS 通过受限命令调用，避免两个进程各自维护数据真相。UI 不直接操作数据库。
+**未来**：真实 Runtime 接入、SQLite 由 Rust 数据服务独占写入、权限与密钥留在可信主机边界，不进前端环境变量。
 
 ## 模块职责
 
-| 模块              | 负责                             | 不负责                     |
-| ----------------- | -------------------------------- | -------------------------- |
-| UI                | 渲染、输入、暂存草稿、窗口导航   | 模型密钥、进程启动、数据库 |
-| OneClient         | UI 稳定接口、错误语义、订阅      | 绑定具体 Agent 协议        |
-| Session Runtime   | 对话、Run、事件顺序、单写入约束  | 模型隐藏状态迁移           |
-| Context Projector | 提取历史、摘要、产物与权限范围   | 自动相信工具结果中的指令   |
-| Agent Connector   | start/cancel/resume/能力探测     | 绕过权限访问系统           |
-| Domain Service    | 日程/笔记校验、幂等与版本        | UI 样式与协议解析          |
-| Native Host       | 窗口、进程、存储、密钥、权限执行 | 业务路由与对话文本策略     |
+| 模块                             | 负责                                 | 不负责                     |
+| -------------------------------- | ------------------------------------ | -------------------------- |
+| 客户端 UI                        | 渲染、输入、暂存草稿、窗口导航       | 模型密钥、进程启动、数据库 |
+| 客户端装配 (`src/lib/client.ts`) | 组装 OneClient 与能力实现            | 绑定具体传输               |
+| 壳 (`src-tauri`)                 | 窗口、菜单、定位、管道读写、进程     | 业务路由与对话文本策略     |
+| ONE 本体 (`core`)                | 权威状态、名册、单写入 Run、能力转发 | 窗口与界面                 |
+| Session Runtime                  | 对话、Run、事件顺序、单写入约束      | 模型隐藏状态迁移           |
+| Context Projector                | 提取历史、摘要、产物与权限范围       | 自动相信工具结果中的指令   |
+| Agent Connector                  | start/cancel/resume/能力探测         | 绕过权限访问系统           |
+| Domain Service                   | 日程/笔记校验、幂等与版本            | UI 样式与协议解析          |
 
 ## 事件与一致性
 
-- 单对话一个活动 Run，不同对话可以独立执行；当前 Mock 已遵守。
+- 单对话一个活动 Run，不同对话可以独立执行；本体与 Mock 都遵守。
 - 持久化事件在事务里分配 conversationId 下严格递增的 seq。
 - completed/cancelled/failed 只能写入一次；忽略取消后到达的旧 token。
 - Delta 只更新临时草稿；Run 终止时固化已生成文本和终态。
-- 重启遇到 running 标记为 interrupted（未来状态），不直接再次执行有副作用的工具。
+- 客户端断开会清理名册，并作废其他人正在等它回执的请求。
 - 对话历史是追加审计流；笔记/日历是可变实体，版本与相关审计事件同事务写入。
-- 数据删除最终要物理删除内容或加密密钥，并清理派生缓存；“追加历史”不意味着永久不能删除私人数据。
+- 数据删除最终要物理删除内容或加密密钥，并清理派生缓存；"追加历史"不意味着永久不能删除私人数据。
 
 ## 插件策略
 

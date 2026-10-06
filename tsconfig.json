@@ -8,6 +8,7 @@
     "noUncheckedIndexedAccess": true,
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "allowJs": true,
     "checkJs": true,
@@ -19,6 +20,7 @@
     "src/**/*.ts",
     "src/**/*.svelte",
     "packages/**/*.ts",
+    "core/**/*.ts",
     "vite.config.ts"
   ]
 }
