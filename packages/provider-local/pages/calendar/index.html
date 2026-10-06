@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>本地日历</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --line: color-mix(in srgb, currentColor 18%, transparent);
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 14px 16px 20px;
+        font:
+          14px/1.6 system-ui,
+          'Microsoft YaHei',
+          sans-serif;
+        color: CanvasText;
+        background: Canvas;
+      }
+      h1 {
+        font-size: 15px;
+        margin: 0 0 2px;
+      }
+      .hint {
+        margin: 0 0 12px;
+        opacity: 0.7;
+        font-size: 12px;
+      }
+      form {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 6px;
+        margin-bottom: 14px;
+      }
+      form .row {
+        grid-column: 1 / -1;
+        display: flex;
+        gap: 6px;
+      }
+      input,
+      button {
+        font: inherit;
+        padding: 6px 8px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: transparent;
+        color: inherit;
+      }
+      button {
+        cursor: pointer;
+      }
+      button.ghost {
+        border-color: transparent;
+        opacity: 0.65;
+      }
+      ul {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+      li {
+        display: flex;
+        gap: 8px;
+        align-items: baseline;
+        padding: 7px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      li:last-child {
+        border-bottom: 0;
+      }
+      .when {
+        font-variant-numeric: tabular-nums;
+        opacity: 0.8;
+        white-space: nowrap;
+      }
+      .what {
+        flex: 1;
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+      .status {
+        min-height: 20px;
+        font-size: 12px;
+        opacity: 0.8;
+      }
+      .status[data-kind='error'] {
+        color: #b3261e;
+        opacity: 1;
+      }
+      .empty {
+        opacity: 0.7;
+        padding: 10px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>本地日历</h1>
+    <p class="hint">
+      这个页面由日历插件自己提供，运行在没有网络与文件权限的沙箱里。
+    </p>
+
+    <form id="add">
+      <div class="row">
+        <input
+          id="title"
+          placeholder="新日程标题"
+          autocomplete="off"
+          required
+        />
+      </div>
+      <div class="row">
+        <input id="starts" type="datetime-local" required />
+        <input id="ends" type="datetime-local" required />
+        <button type="submit">加入日程</button>
+      </div>
+    </form>
+
+    <p class="status" id="status" role="status"></p>
+    <div id="list"><p class="empty">正在读取…</p></div>
+
+    <script>
+      // 页面唯一能做的事：向宿主 postMessage，宿主转给本体，由本体裁决后才回数据。
+      // 协议见 packages/contracts/src/page.ts；这里的字面量必须与它一致。
+      var PROTOCOL = 'one.plugin.v1';
+      var seq = 0;
+
+      function ask(capability, args) {
+        seq += 1;
+        var id = 'page-' + seq;
+        return new Promise(function (resolve, reject) {
+          var timer = setTimeout(function () {
+            reject(new Error('本体没有回应'));
+          }, 8000);
+          function onMessage(event) {
+            // 宿主会把回复发回这个窗口；只认协议标记与 id 自己对上的那条。
+            var data = event.data;
+            if (!data || data.protocol !== PROTOCOL || data.id !== id) return;
+            clearTimeout(timer);
+            window.removeEventListener('message', onMessage);
+            if (data.ok) resolve(data.value);
+            else reject(new Error(data.message || '操作失败'));
+          }
+          window.addEventListener('message', onMessage);
+          // 页面不自带身份：宿主按窗口绑定的提供方转发，页面说什么都没用。
+          window.parent.postMessage(
+            { protocol: PROTOCOL, id: id, capability: capability, args: args },
+            '*',
+          );
+        });
+      }
+
+      var el = function (id) {
+        return document.getElementById(id);
+      };
+
+      function say(text, kind) {
+        var node = el('status');
+        node.textContent = text;
+        node.setAttribute('data-kind', kind || 'info');
+      }
+
+      function zone() {
+        try {
+          return (
+            Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'
+          );
+        } catch (error) {
+          return 'Asia/Shanghai';
+        }
+      }
+
+      /** datetime-local 给的是本地时间，接口要的是带偏移的 RFC3339。 */
+      function toInstant(value) {
+        var date = new Date(value);
+        if (isNaN(date.getTime())) throw new Error('时间格式不正确');
+        var offset = -date.getTimezoneOffset();
+        var sign = offset >= 0 ? '+' : '-';
+        var pad = function (n) {
+          return String(Math.abs(n)).padStart(2, '0');
+        };
+        return (
+          date.toISOString().slice(0, 19) +
+          sign +
+          pad(Math.floor(offset / 60)) +
+          ':' +
+          pad(offset % 60)
+        );
+      }
+
+      function when(startsAt, endsAt) {
+        var start = new Date(startsAt);
+        if (isNaN(start.getTime())) return startsAt;
+        var text = start.toLocaleString('zh-CN', {
+          month: 'numeric',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+        var end = new Date(endsAt);
+        if (
+          !isNaN(end.getTime()) &&
+          end.getTime() - start.getTime() < 86400000
+        ) {
+          text +=
+            ' – ' +
+            end.toLocaleTimeString('zh-CN', {
+              hour: '2-digit',
+              minute: '2-digit',
+            });
+        }
+        return text;
+      }
+
+      function render(items) {
+        var host = el('list');
+        host.textContent = '';
+        if (!items.length) {
+          var empty = document.createElement('p');
+          empty.className = 'empty';
+          empty.textContent = '这一周还没有日程。';
+          host.appendChild(empty);
+          return;
+        }
+        var list = document.createElement('ul');
+        items.forEach(function (item) {
+          var row = document.createElement('li');
+          var whenNode = document.createElement('span');
+          whenNode.className = 'when';
+          whenNode.textContent = when(item.startsAt, item.endsAt);
+          var what = document.createElement('span');
+          what.className = 'what';
+          what.textContent = item.title;
+          var drop = document.createElement('button');
+          drop.className = 'ghost';
+          drop.type = 'button';
+          drop.textContent = '删除';
+          drop.addEventListener('click', function () {
+            drop.disabled = true;
+            ask('calendar.remove', {
+              id: item.id,
+              expectedVersion: item.version,
+              idempotencyKey: crypto.randomUUID(),
+            })
+              .then(function () {
+                say('已删除。');
+                return refresh();
+              })
+              .catch(function (error) {
+                say(error.message, 'error');
+                drop.disabled = false;
+              });
+          });
+          row.appendChild(whenNode);
+          row.appendChild(what);
+          row.appendChild(drop);
+          list.appendChild(row);
+        });
+        host.appendChild(list);
+      }
+
+      function refresh() {
+        var now = new Date();
+        var week = new Date(now.getTime() + 7 * 86400000);
+        return ask('calendar.list', {
+          rangeStart: now.toISOString(),
+          rangeEnd: week.toISOString(),
+          timeZone: zone(),
+          limit: 50,
+        })
+          .then(function (page) {
+            render(page.items || []);
+          })
+          .catch(function (error) {
+            el('list').textContent = '';
+            say(error.message, 'error');
+          });
+      }
+
+      el('add').addEventListener('submit', function (event) {
+        event.preventDefault();
+        var button = event.target.querySelector('button');
+        button.disabled = true;
+        ask('calendar.create', {
+          title: el('title').value,
+          startsAt: toInstant(el('starts').value),
+          endsAt: toInstant(el('ends').value),
+          timeZone: zone(),
+          idempotencyKey: crypto.randomUUID(),
+        })
+          .then(function () {
+            el('title').value = '';
+            say('已加入日程。');
+            return refresh();
+          })
+          .catch(function (error) {
+            say(error.message, 'error');
+          })
+          .then(function () {
+            button.disabled = false;
+          });
+      });
+
+      var now = new Date();
+      var later = new Date(now.getTime() + 3600000);
+      var pad = function (n) {
+        return String(n).padStart(2, '0');
+      };
+      var local = function (date) {
+        return (
+          date.getFullYear() +
+          '-' +
+          pad(date.getMonth() + 1) +
+          '-' +
+          pad(date.getDate()) +
+          'T' +
+          pad(date.getHours()) +
+          ':' +
+          pad(date.getMinutes())
+        );
+      };
+      el('starts').value = local(later);
+      el('ends').value = local(new Date(later.getTime() + 3600000));
+      refresh();
+    </script>
+  </body>
+</html>

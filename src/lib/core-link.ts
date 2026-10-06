@@ -61,6 +61,11 @@ export interface CoreChannel {
   send(frame: ClientMessage): Promise<void>;
   onFrame(handler: (line: string) => void): () => void;
   onStatus(handler: (status: CoreConnection) => void): () => void;
+  /**
+   * 请壳重放本体最近几帧。只有只读窗口用得到 —— 一根管道只握手一次，后开的
+   * 窗口靠这个才拿得到状态与名册（ADR-013：客户端是进程，窗口只是它的屏幕）。
+   */
+  replay?(): Promise<void>;
 }
 
 /** 每个请求帧都自带 id，本体靠它把回执送回来；hello 和 ping 不算请求。 */
@@ -100,6 +105,12 @@ export interface CoreClient {
     capability: string,
     args?: unknown,
   ): Promise<unknown>;
+  /**
+   * 按命令名直调一次白名单命令。只给插件页面桥用：页面报的是能力名，先在
+   * page.ts 的表里换成命令名，再走这里 —— 命令名永远不是页面给的，而领域输入
+   * 也就照旧在本体边界校验一次（ADR-016）。
+   */
+  callCommand(command: string, args: unknown[]): Promise<unknown>;
   /** 声明本客户端能被别人调用的能力。 */
   expose(capability: string, handler: (args: unknown) => unknown): void;
   dispose(): void;
@@ -111,7 +122,12 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 export function createCoreClient(
   channel: CoreChannel,
   hello: ClientMessage,
+  options: { handshake?: boolean } = {},
 ): CoreClient {
+  // 一根管道只握手一次（ADR-013：客户端是进程，窗口只是它的屏幕）。只读窗口
+  // 不握手，而是向壳要重放 —— 每个窗口都握一次手的话，本体只认第一次，
+  // 后来的窗口既拿不到回执，也永远等不到下一次握手。
+  const handshakes = options.handshake !== false;
   let state: CoreLinkState = 'connecting';
   let refusal = '';
   /** 帧发不出去时的原因：壳说连上了但握手送不到，是两种不同的故障。 */
@@ -190,14 +206,19 @@ export function createCoreClient(
       .then((resolved) =>
         channel.send({ t: 'capability.result', id, ok: true, value: resolved }),
       )
-      .catch((cause: unknown) =>
-        refuse(id, cause instanceof Error ? cause.message : '本客户端处理失败'),
-      );
+      .catch((cause: unknown) => refuse(id, cause));
   };
 
-  const refuse = (id: string, message: string) => {
+  /** 码一起发：本体的域端口与提供方靠它分流，不发就一律当 INTERNAL。 */
+  const refuse = (id: string, cause: unknown) => {
     void channel
-      .send({ t: 'capability.result', id, ok: false, message })
+      .send({
+        t: 'capability.result',
+        id,
+        ok: false,
+        code: cause instanceof ClientError ? cause.code : 'INTERNAL',
+        message: cause instanceof Error ? cause.message : '本客户端处理失败',
+      })
       .catch(() => undefined);
   };
 
@@ -288,6 +309,12 @@ export function createCoreClient(
       markUnavailable(new ClientError('UNAVAILABLE', 'ONE 本体没有连接'));
       return;
     }
+    if (!handshakes) {
+      // 只读窗口不握手，但要像主窗口一样从"正在连接"走到"已连接"。
+      state = 'ready';
+      settle();
+      return;
+    }
     // 同一根连接上会收到重复的通知（挂载时查一次状态，壳连上时再报一次）。
     // 只有真正换了连接才重新握手，否则会把刚接好的状态又推回 connecting。
     if (wasConnected && handshaking) {
@@ -319,6 +346,15 @@ export function createCoreClient(
     .connection()
     .then((status) => {
       connection = status;
+      if (!handshakes) {
+        // 监听到位之后再要重放：先要的话，那几帧会落在没人听的窗口里。
+        if (status.connected) state = 'ready';
+        void channel
+          .replay?.()
+          .catch((cause: unknown) => markUnavailable(cause));
+        settle();
+        return;
+      }
       if (status.connected && !handshaking) handshake();
     })
     .catch((cause: unknown) => {
@@ -409,6 +445,7 @@ export function createCoreClient(
         capability,
         args,
       }),
+    callCommand: (command, args) => call(command, args),
     expose: (capability, handler) => {
       capabilities.set(capability, handler);
     },

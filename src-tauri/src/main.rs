@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod core_link;
+mod plugin;
 
 use std::time::Duration;
 
@@ -25,6 +26,9 @@ const RESTART_CORE: &str = "restart_core";
 const PET_BUBBLE: &str = "pet_bubble";
 const PET_SHOW: &str = "pet_show";
 const QUIT: &str = "quit";
+/// 插件页面菜单项的前缀，后面紧跟寻址键。菜单是每次右键现搭的，所以这些 id
+/// 不在常量表里：`menu_action` 靠前缀认出它们，页面由本体与宿主商定，壳不写死。
+const PLUGIN_ITEM: &str = "plugin:";
 
 /// What a menu entry does. Clients never spawn each other: launching and asking
 /// the pet to do something both go through core, the only thing that knows what
@@ -34,10 +38,14 @@ enum MenuAction {
     Launch(&'static str),
     RestartCore,
     PetCapability(&'static str),
+    OpenPlugin(String),
     Quit,
 }
 
 fn menu_action(id: &str) -> Option<MenuAction> {
+    if let Some(provider) = id.strip_prefix(PLUGIN_ITEM) {
+        return Some(MenuAction::OpenPlugin(provider.to_string()));
+    }
     Some(match id {
         LAUNCH_DESKTOP => MenuAction::Launch("desktop"),
         LAUNCH_PET => MenuAction::Launch("pet"),
@@ -51,7 +59,7 @@ fn menu_action(id: &str) -> Option<MenuAction> {
 /// If the host window cannot answer, quitting must not hang the app.
 const QUIT_GRACE: Duration = Duration::from_millis(3000);
 /// Kept in sync with packages/contracts/src/wire.ts.
-const WIRE_VERSION: u32 = 2;
+const WIRE_VERSION: u32 = 3;
 
 /// 能力名只说做什么，不带实现前缀（ADR-017）。以前是 pet.bubble.open，换实现
 /// 就得改调用方；现在由寻址键决定谁提供，壳和界面共用同一份字符串，
@@ -348,16 +356,35 @@ fn shell_commands() -> Vec<&'static str> {
         "core_answer",
         "core_start",
         "core_hello",
+        "core_replay",
+        "open_plugin_page",
+        "close_plugin_window",
         "quit_app",
         "force_quit",
         "shell_commands",
     ]
 }
 
+/// `--open-plugin=<provider>`：启动后直接开一个插件页面窗口。
+/// 传了非法寻址键就当没传 —— 少开一个窗口比开一个带路径的窗口安全。
+fn open_plugin_arg() -> Option<String> {
+    let raw = std::env::args()
+        .find(|arg| arg.starts_with("--open-plugin="))?
+        .split_once('=')?
+        .1
+        .to_string();
+    if plugin::is_provider_id(&raw) {
+        Some(raw)
+    } else {
+        None
+    }
+}
+
 /// Which client this process is, and which window is asking. The renderer asks
 /// the shell instead of guessing from the URL: both clients load the same page.
 #[tauri::command]
 fn client_identity(
+    app: AppHandle,
     window: WebviewWindow,
     link: State<'_, core_link::CoreLink>,
     client: State<'_, ClientKind>,
@@ -367,6 +394,9 @@ fn client_identity(
     // 但对话条只是宠物的另一块屏幕：它要状态，不要能力——否则"请宠物打开对话条"
     // 会被同进程的每个窗口各答一次，靠"谁先回"决定结果。
     let is_view = window.label() != client.primary_window;
+    // 插件窗口的身份来自壳的绑定表，不来自窗口自己报的什么：页面的沙箱里连
+    // 自己的地址都读不到，宿主必须先知道「这个窗口属于谁」（ADR-018）。
+    let plugin_provider = plugin::binding_for(&app, window.label());
     json!({
         "role": status.role,
         "provider": status.provider,
@@ -375,6 +405,12 @@ fn client_identity(
         "wireVersion": status.wire_version,
         "window": window.label(),
         "primaryWindow": client.primary_window,
+        // 一根管道只有一次握手（ADR-013：客户端是进程，窗口只是屏幕）。
+        // 只有主窗口握手，其余窗口向壳要重放 —— 每个窗口各握一次手的话，
+        // 本体只认第一次，后来的窗口会永远停在「正在连接」。
+        "windowRole": if is_view { "view" } else { "primary" },
+        "pluginProvider": plugin_provider,
+        "pluginPageBase": plugin_page_base(),
     })
 }
 
@@ -415,6 +451,37 @@ fn core_hello(link: State<'_, core_link::CoreLink>) -> Value {
 #[tauri::command]
 fn core_start() -> Result<(), String> {
     core_link::start_core()
+}
+
+/// 插件页面在 iframe 里要写的地址前缀（ADR-018）。
+///
+/// Windows 上 WebView2 不认非标准协议，wry 靠拦截 `http://one-plugin.` 开头的请求
+/// 来还原（`custom_protocol_workaround`）。iframe 走的是资源请求，拿 `one-plugin://`
+/// 的原地址去匹配匹配不上，页面会安静地什么都不显示 —— 所以要直接给改写后的形式。
+/// 这件事只有宿主知道该给哪个，所以由壳告诉界面，而不是界面自己猜平台。
+fn plugin_page_base() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "http://one-plugin.localhost"
+    } else {
+        "one-plugin://localhost"
+    }
+}
+
+/// 开一个插件页面窗口。同一个提供方只有一个窗口：重复点只是把它叫到前面。
+#[tauri::command]
+fn open_plugin_page(app: AppHandle, provider: String) -> Result<Value, String> {
+    plugin::open(&app, &provider)
+}
+
+/// 插件窗口自己的关闭按钮。绑定要一起清掉，否则标签被复用时会带着上个提供方的身份。
+#[tauri::command]
+fn close_plugin_window(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
+    let label = window.label().to_string();
+    window.close().map_err(|error| error.to_string())?;
+    if let Some(windows) = app.try_state::<plugin::PluginWindows>() {
+        windows.forget(&label);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -507,9 +574,32 @@ fn build_windows(app: &AppHandle, client: ClientKindArg) -> Result<(), String> {
 /// 谁连着。
 fn pet_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let launch = MenuItem::with_id(app, LAUNCH_DESKTOP, "打开 ONE 桌面端", true, None::<&str>)?;
+    // 菜单每次弹出时现问本体「谁带着页面」。宿主是唯一知道装了什么的角色，
+    // 所以没装或没运行的插件这里**不会出现** —— 不拿一个点了打不开的入口充数。
+    // 三态的引导归摘要条（ADR-018），菜单只负责在场。
+    let plugins: Vec<MenuItem<tauri::Wry>> = plugin::connected_views(app)
+        .into_iter()
+        .map(|(provider, label)| {
+            MenuItem::with_id(
+                app,
+                format!("{PLUGIN_ITEM}{provider}"),
+                format!("打开{label}页面"),
+                true,
+                None::<&str>,
+            )
+        })
+        .collect::<tauri::Result<_>>()?;
     let restart = MenuItem::with_id(app, RESTART_CORE, "重新启动 ONE 本体", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, QUIT, "退出", true, None::<&str>)?;
-    Menu::with_items(app, &[&launch, &restart, &quit])
+    let mut owned = vec![launch];
+    owned.extend(plugins);
+    owned.push(restart);
+    owned.push(quit);
+    let items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = owned
+        .iter()
+        .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
+        .collect();
+    Menu::with_items(app, &items)
 }
 
 fn desktop_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
@@ -594,8 +684,11 @@ fn main() {
     let client = ClientKindArg::parse();
     let identity = ClientKind::of(client);
 
-    tauri::Builder::default()
+    // 插件页面的自定义协议必须赶在开窗之前注册好：页面一加载就会请求资源，
+    // 晚一步的话 iframe 拿到的是一次失败导航，用户只看到一块空白。
+    plugin::install(tauri::Builder::default())
         .manage(identity)
+        .manage(plugin::PluginWindows::default())
         .setup(move |app| {
             let handle = app.handle().clone();
             // 顺序很重要。先装好本体桥接，再开窗：窗口一创建，页面就会立刻调用
@@ -622,6 +715,13 @@ fn main() {
             if let Err(error) = install_menu(&handle, client) {
                 eprintln!("one: 安装菜单失败：{error}");
             }
+            // `--open-plugin=<provider>` 直接开一个插件页面。调试插件与验收都
+            // 需要一条不靠鼠标的路：页面加载成功与否完全体现在下面的日志里。
+            if let Some(provider) = open_plugin_arg() {
+                if let Err(error) = plugin::open(&handle, &provider) {
+                    eprintln!("one: 打开{provider}的页面失败：{error}");
+                }
+            }
             app.on_menu_event(|app, event| match menu_action(event.id().as_ref()) {
                 Some(MenuAction::Launch(kind)) => launch_through_core(app, kind),
                 Some(MenuAction::RestartCore) => {
@@ -631,6 +731,11 @@ fn main() {
                 }
                 Some(MenuAction::PetCapability(capability)) => {
                     call_pet_through_core(app, capability)
+                }
+                Some(MenuAction::OpenPlugin(provider)) => {
+                    if let Err(error) = plugin::open(app, &provider) {
+                        eprintln!("one: 打开{provider}的页面失败：{error}");
+                    }
                 }
                 Some(MenuAction::Quit) => quit_app(app.clone()),
                 None => {}
@@ -653,6 +758,9 @@ fn main() {
             core_answer,
             core_hello,
             core_start,
+            core_link::core_replay,
+            open_plugin_page,
+            close_plugin_window,
             quit_app,
             force_quit,
             shell_commands
@@ -740,6 +848,28 @@ mod tests {
             assert!(menu_action(id).is_some(), "菜单项 {id} 没有对应动作");
         }
         assert_eq!(menu_action("没有这个菜单项"), None);
+    }
+
+    #[test]
+    fn a_plugin_menu_item_carries_its_provider_and_nothing_else() {
+        // 菜单项 id 里带寻址键：宿主由此知道要开谁的页面，而**不是**页面告诉
+        // 宿主的。id 后面多跟一段（比如伪造一个路径）必须被拒绝。
+        assert_eq!(
+            menu_action("plugin:local.calendar"),
+            Some(MenuAction::OpenPlugin("local.calendar".into()))
+        );
+        assert_eq!(
+            menu_action("plugin:local.calendar/../../etc"),
+            Some(MenuAction::OpenPlugin("local.calendar/../../etc".into())),
+            "menu_action 只做拆前缀，真正的寻址键校验在开窗那一步"
+        );
+        assert!(matches!(
+            menu_action("plugin:"),
+            Some(MenuAction::OpenPlugin(ref empty)) if empty.is_empty()
+        ));
+        // 但开窗那一步必须挡住它，否则就成了路径穿越的入口。
+        assert!(!plugin::is_provider_id("local.calendar/../../etc"));
+        assert!(!plugin::is_provider_id(""));
     }
 
     #[test]

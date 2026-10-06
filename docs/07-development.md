@@ -63,6 +63,23 @@ Set-Location src-tauri; cargo test   # 窗口定位、菜单接线、帧边界�
 
 **发布版必须用 `pnpm desktop:build`。** `cargo build --release` 不会重新嵌入前端资源，会得到一个打开就是"无法访问此页面"的程序。`scripts/client.mjs` 会先确保本体在运行、再拉起客户端。
 
+## 调试插件页面
+
+```powershell
+$env:ONE_REPO_ROOT = "E:\Projects\ONE"
+src-tauri\target\release\one-desktop.exe --client=pet --open-plugin=local.calendar
+```
+
+`--open-plugin=<provider>` 启动即开一个插件页面窗口，不必靠鼠标（实机验收靠它）。页面能不能加载出来全看壳的标准错误，三行依次出现就是通的：
+
+```
+one: 插件页面请求 one-plugin://localhost/local.calendar/index.html
+one: 壳发起 shell-1
+one: 本体已处理 shell-1：{"content":"<!doctype html>…"}
+```
+
+少了第一行，问题在 WebView 侧（地址前缀或 CSP）；少了第三行，问题在提供方那边。抓窗口内容用 `.one/capture-window.ps1`（`PrintWindow` 直接抓窗口客户区，屏幕上被游戏挡住也拍得到）。
+
 ## 改管道代码前必读
 
 壳与本体之间是 Windows 命名管道。写入句柄由 `File::try_clone()` 得到，而 Windows 上 `try_clone` 走 `DuplicateHandle`：两个句柄指向同一个文件对象，同步 I/O 在文件对象上串行化。**只要读取线程停在 `ReadFile` 里等数据，写端就永远发不出去** —— 而本体在收到第一帧之前不会主动说话，所以握手会静默卡死，症状是"名册里没有这个客户端，但管道明明连上了"。现在的读端用 `PeekNamedPipe` 轮询，没有数据就让出文件对象（`src-tauri/src/core_link.rs`）。改这块之前先读那里的注释。

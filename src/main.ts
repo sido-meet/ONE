@@ -2,6 +2,7 @@ import { mount } from 'svelte';
 import MainWindow from './windows/MainWindow.svelte';
 import PetWindow from './windows/PetWindow.svelte';
 import BubbleWindow from './windows/BubbleWindow.svelte';
+import PluginWindow from './windows/PluginWindow.svelte';
 import { startClient } from './lib/client';
 import './app.css';
 
@@ -26,8 +27,11 @@ window.addEventListener('unhandledrejection', (event) => fail(event.reason));
 
 void startClient()
   .then((self) => {
-    const View =
-      self.window === 'pet'
+    // 插件窗口优先：它带的是壳给的绑定，不看标签前缀（ADR-018）。窗口与提供方
+    // 一一绑定这件事由壳保证，界面不需要也不该自己去猜。
+    const View = self.pluginProvider
+      ? PluginWindow
+      : self.window === 'pet'
         ? PetWindow
         : self.window === 'bubble'
           ? BubbleWindow

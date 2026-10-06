@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>本地笔记</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --line: color-mix(in srgb, currentColor 18%, transparent);
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 14px 16px 20px;
+        font:
+          14px/1.6 system-ui,
+          'Microsoft YaHei',
+          sans-serif;
+        color: CanvasText;
+        background: Canvas;
+      }
+      h1 {
+        font-size: 15px;
+        margin: 0 0 2px;
+      }
+      .hint {
+        margin: 0 0 12px;
+        opacity: 0.7;
+        font-size: 12px;
+      }
+      form {
+        display: grid;
+        gap: 6px;
+        margin-bottom: 14px;
+      }
+      input,
+      textarea,
+      button {
+        font: inherit;
+        padding: 6px 8px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: transparent;
+        color: inherit;
+      }
+      textarea {
+        resize: vertical;
+        min-height: 64px;
+      }
+      button {
+        cursor: pointer;
+        justify-self: start;
+      }
+      ul {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+      li {
+        display: flex;
+        gap: 8px;
+        align-items: baseline;
+        padding: 7px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      li:last-child {
+        border-bottom: 0;
+      }
+      .what {
+        flex: 1;
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+      .when {
+        font-size: 12px;
+        opacity: 0.7;
+        white-space: nowrap;
+      }
+      button.ghost {
+        border-color: transparent;
+        opacity: 0.65;
+        padding: 2px 6px;
+      }
+      .status {
+        min-height: 20px;
+        font-size: 12px;
+        opacity: 0.8;
+      }
+      .status[data-kind='error'] {
+        color: #b3261e;
+        opacity: 1;
+      }
+      .empty {
+        opacity: 0.7;
+        padding: 10px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>本地笔记</h1>
+    <p class="hint">
+      这个页面由笔记插件自己提供，运行在没有网络与文件权限的沙箱里。
+    </p>
+
+    <form id="add">
+      <input id="title" placeholder="新笔记标题" autocomplete="off" required />
+      <textarea id="body" placeholder="正文（可留空）"></textarea>
+      <button type="submit">记下来</button>
+    </form>
+
+    <p class="status" id="status" role="status"></p>
+    <div id="list"><p class="empty">正在读取…</p></div>
+
+    <script>
+      // 协议与沙箱约定见 packages/contracts/src/page.ts。
+      // 页面没有身份：宿主按窗口绑定的提供方转发，页面报什么都不作数（ADR-018）。
+      var PROTOCOL = 'one.plugin.v1';
+      var seq = 0;
+
+      function ask(capability, args) {
+        seq += 1;
+        var id = 'page-' + seq;
+        return new Promise(function (resolve, reject) {
+          var timer = setTimeout(function () {
+            reject(new Error('本体没有回应'));
+          }, 8000);
+          function onMessage(event) {
+            var data = event.data;
+            if (!data || data.protocol !== PROTOCOL || data.id !== id) return;
+            clearTimeout(timer);
+            window.removeEventListener('message', onMessage);
+            if (data.ok) resolve(data.value);
+            else reject(new Error(data.message || '操作失败'));
+          }
+          window.addEventListener('message', onMessage);
+          window.parent.postMessage(
+            { protocol: PROTOCOL, id: id, capability: capability, args: args },
+            '*',
+          );
+        });
+      }
+
+      var el = function (id) {
+        return document.getElementById(id);
+      };
+
+      function say(text, kind) {
+        var node = el('status');
+        node.textContent = text;
+        node.setAttribute('data-kind', kind || 'info');
+      }
+
+      function when(iso) {
+        var date = new Date(iso);
+        if (isNaN(date.getTime())) return '';
+        return date.toLocaleDateString('zh-CN', {
+          year: 'numeric',
+          month: 'numeric',
+          day: 'numeric',
+        });
+      }
+
+      function render(items) {
+        var host = el('list');
+        host.textContent = '';
+        if (!items.length) {
+          var empty = document.createElement('p');
+          empty.className = 'empty';
+          empty.textContent = '还没有笔记。';
+          host.appendChild(empty);
+          return;
+        }
+        var list = document.createElement('ul');
+        items.forEach(function (item) {
+          var row = document.createElement('li');
+          var what = document.createElement('span');
+          what.className = 'what';
+          what.textContent = item.title;
+          var whenNode = document.createElement('span');
+          whenNode.className = 'when';
+          whenNode.textContent = when(item.updatedAt);
+          var drop = document.createElement('button');
+          drop.className = 'ghost';
+          drop.type = 'button';
+          drop.textContent = '删除';
+          drop.addEventListener('click', function () {
+            drop.disabled = true;
+            ask('notes.remove', {
+              id: item.id,
+              expectedVersion: item.version,
+              idempotencyKey: crypto.randomUUID(),
+            })
+              .then(function () {
+                say('已删除。');
+                return refresh();
+              })
+              .catch(function (error) {
+                say(error.message, 'error');
+                drop.disabled = false;
+              });
+          });
+          row.appendChild(what);
+          row.appendChild(whenNode);
+          row.appendChild(drop);
+          list.appendChild(row);
+        });
+        host.appendChild(list);
+      }
+
+      function refresh() {
+        return ask('notes.list', { limit: 50 })
+          .then(function (page) {
+            render(page.items || []);
+          })
+          .catch(function (error) {
+            el('list').textContent = '';
+            say(error.message, 'error');
+          });
+      }
+
+      el('add').addEventListener('submit', function (event) {
+        event.preventDefault();
+        var button = event.target.querySelector('button');
+        button.disabled = true;
+        ask('notes.create', {
+          title: el('title').value,
+          body: el('body').value,
+          idempotencyKey: crypto.randomUUID(),
+        })
+          .then(function () {
+            el('title').value = '';
+            el('body').value = '';
+            say('已记下来。');
+            return refresh();
+          })
+          .catch(function (error) {
+            say(error.message, 'error');
+          })
+          .then(function () {
+            button.disabled = false;
+          });
+      });
+
+      refresh();
+    </script>
+  </body>
+</html>

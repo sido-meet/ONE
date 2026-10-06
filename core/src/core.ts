@@ -24,6 +24,7 @@ import {
   resolveProvider,
 } from '../../packages/contracts/src/index.ts';
 import { WIRE_VERSION } from '../../packages/contracts/src/wire.ts';
+import { PAGE_READ_CAPABILITY } from '../../packages/contracts/src/page.ts';
 
 /**
  * ONE 本体的会话中枢（ADR-013）。
@@ -70,7 +71,9 @@ interface Session {
   connectedAt: string;
   waiting: Map<
     string,
-    { resolve: (value: unknown) => void; reject: (message: string) => void }
+    // 拒绝时带的是 ClientError 而不是字符串：码要一路送到界面，否则"没这个文件"
+    // 与"里面坏了"在用户那里长得一模一样（ADR-016）。
+    { resolve: (value: unknown) => void; reject: (error: unknown) => void }
   >;
 }
 
@@ -95,6 +98,15 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
   const broadcast = (message: CoreMessage) => {
     sessions.forEach((session) => session.connection.send(message));
   };
+
+  /**
+   * 寻址键全局唯一，因此一个键至多一个会话。名册、名册校验与页面请求都靠它，
+   * 不各写一份查找逻辑 —— 几份查找迟早会在边界情况上分叉。
+   */
+  const sessionsByProvider = (provider: ProviderId): Session | undefined =>
+    [...sessions.values()].find(
+      (session) => session.info.provider === provider,
+    );
 
   const pushState = () => {
     revision += 1;
@@ -220,9 +232,7 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
   ) => {
     const respond = (message: CoreMessage) =>
       requester.connection.send(message);
-    const found = [...sessions.values()].find(
-      (session) => session.info.provider === target,
-    );
+    const found = sessionsByProvider(target);
     if (!found) {
       respond({
         t: 'result',
@@ -264,7 +274,7 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
           t: 'result',
           id,
           ok: false,
-          error: { code: 'INTERNAL', message },
+          error: describe(message),
         });
       },
     });
@@ -283,9 +293,7 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
     args?: unknown,
   ): Promise<unknown> =>
     new Promise((resolve, reject) => {
-      const found = [...sessions.values()].find(
-        (session) => session.info.provider === target,
-      );
+      const found = sessionsByProvider(target);
       if (!found) {
         reject(new ClientError('UNAVAILABLE', `${target} 没有在运行`));
         return;
@@ -308,11 +316,92 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
         },
         reject: (message) => {
           clearTimeout(timer);
-          reject(new ClientError('INTERNAL', message));
+          // 目标报的码原样带走：界面上"日历源没授权"与"日历源崩了"必须分开。
+          reject(
+            message instanceof ClientError
+              ? message
+              : new ClientError(
+                  'INTERNAL',
+                  message instanceof Error
+                    ? message.message
+                    : '目标客户端处理失败',
+                ),
+          );
         },
       });
       found.connection.send({ t: 'invoke', id, capability, args });
     });
+
+  /**
+   * 取插件页面的一段资源（ADR-018）。
+   *
+   * 宿主不给插件页面发请求，只来这里要：要来的路径仍然按提供方申报的入口与
+   * `page.read` 能力核对过才转发。三道闸门缺一不可 ——
+   *
+   * - 目标必须在场：没运行就报「没有在运行」，不是「没这个文件」；
+   * - 目标必须**自己申报过页面**：没申报的参与者即使会答 `page.read` 也不放行，
+   *   否则任何客户端都能借它当文件服务器；
+   * - 目标必须提供 `page.read`：它没这个能力的话这次调用必然失败，不如本体先说。
+   *
+   * 本体自己不改写内容，只是转交 —— 页面长什么样归插件（ADR-018 已接受的代价）。
+   */
+  const handlePageRead = async (
+    session: Session,
+    id: string,
+    provider: ProviderId,
+    path: string,
+  ) => {
+    const respond = (message: CoreMessage) => session.connection.send(message);
+    const found = sessionsByProvider(provider);
+    if (!found) {
+      respond({
+        t: 'result',
+        id,
+        ok: false,
+        error: { code: 'UNAVAILABLE', message: `${provider} 没有在运行` },
+      });
+      return;
+    }
+    if (!found.info.view) {
+      respond({
+        t: 'result',
+        id,
+        ok: false,
+        error: {
+          code: 'NOT_FOUND',
+          message: `${provider} 没有自带页面`,
+        },
+      });
+      return;
+    }
+    if (!found.info.capabilities.includes(PAGE_READ_CAPABILITY)) {
+      respond({
+        t: 'result',
+        id,
+        ok: false,
+        error: {
+          code: 'NOT_FOUND',
+          message: `${provider} 没有提供 ${PAGE_READ_CAPABILITY}`,
+        },
+      });
+      return;
+    }
+    try {
+      respond({
+        t: 'result',
+        id,
+        ok: true,
+        value: await invoke(provider, PAGE_READ_CAPABILITY, { path }),
+      });
+    } catch (error) {
+      respond({
+        t: 'result',
+        id,
+        ok: false,
+        error: describe(error),
+      });
+    }
+  };
 
   const handleLaunch = async (id: string, provider: ProviderId) => {
     const running = [...sessions.values()].some(
@@ -353,17 +442,23 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
   const handleCapabilityResult = (
     session: Session,
     id: string,
-    ok: boolean,
-    payload: unknown,
+    message: Extract<ClientMessage, { t: 'capability.result' }>,
   ) => {
     const waiting = session.waiting.get(id);
     if (!waiting) return;
     session.waiting.delete(id);
-    if (ok) waiting.resolve(payload);
-    else
-      waiting.reject(
-        typeof payload === 'string' ? payload : '目标客户端处理失败',
-      );
+    if (message.ok) {
+      waiting.resolve(message.value);
+      return;
+    }
+    // 对方报了码就照传。丢掉码的话，提供方的「没这个文件」到壳那里会变成
+    // 「内部错误」，界面上就只能给一句没法排查的话（ADR-016）。
+    waiting.reject(
+      new ClientError(
+        message.code ?? 'INTERNAL',
+        message.message || '目标客户端处理失败',
+      ),
+    );
   };
 
   const handleMessage = (session: Session, message: ClientMessage) => {
@@ -384,12 +479,7 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
         );
         return;
       case 'capability.result':
-        handleCapabilityResult(
-          session,
-          message.id,
-          message.ok,
-          message.ok ? message.value : message.message,
-        );
+        handleCapabilityResult(session, message.id, message);
         return;
       case 'clients.list':
         session.connection.send({
@@ -401,6 +491,14 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
         return;
       case 'clients.launch':
         void handleLaunch(message.id, message.provider);
+        return;
+      case 'page.read':
+        void handlePageRead(
+          session,
+          message.id,
+          message.provider,
+          message.path,
+        );
         return;
       default:
         return;
@@ -432,6 +530,7 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
         provider: hello.client.provider,
         label: hello.client.label,
         capabilities: hello.client.capabilities,
+        ...(hello.client.view ? { view: hello.client.view } : {}),
       },
       connection,
       connectedAt: new Date().toISOString(),

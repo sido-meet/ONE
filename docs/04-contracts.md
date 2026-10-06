@@ -71,6 +71,23 @@ erDiagram
 
 **接口演进约束**：当前 getSnapshot 同步是 UI 本地缓存接口。未来 IPC Client 要先异步握手加载缓存，再进入 ready；网络请求不得伪装成同步读取。扩展 `connect()/connectionState` 时一起更新 Mock 和契约测试，不承诺完全无需改 UI。
 
+## 已实现：插件页面契约（ADR-018）
+
+`packages/contracts/src/page.ts`。协议标记 `one.plugin.v1`，页面与宿主之间只有 `postMessage` 一条路。
+
+| 消息         | 字段                                  | 谁发        | 说明                                                 |
+| ------------ | ------------------------------------- | ----------- | ---------------------------------------------------- |
+| PageRequest  | `protocol, id, capability, args`      | 页面 → 宿主 | `capability` 是能力名（`calendar.list`），不是命令名 |
+| PageResponse | `protocol, id, ok, value? / message?` | 宿主 → 页面 | 失败必须给 `message`，不许用空结果冒充成功           |
+
+三条不能省的约束：
+
+- **能力名 → 命令名由宿主翻译**（`PAGE_DOMAIN_COMMANDS`）。`calendar.remove` 对应的本体命令是 `calendarDelete`，靠改写字符串得到的是另一个不存在的命令；而且翻译之后输入会**再过一次本体边界的校验**（ADR-016），直接按能力名转发会绕过那一次。
+- **页面没有身份字段。** 上下文 `workspaceId` / `source` 由宿主补，页面报了也不作数。宿主靠**窗口绑定**知道这个窗口属于哪个提供方（ADR-018 第 3 条）。
+- **页面路径受守卫**（`isPagePath`）：相对、无 `..`、无反斜杠，入口非法就当没申报 —— 宿主会把它拼进 `one-plugin://` 地址，坏路径必须在协议解析那一层挡住。
+
+协议本身随 wire v3 走：参与者在 `hello.client.view` 里申报入口，宿主用 `page.read` 向本体要资源。**为什么升版本而不是加个可选字段**：v2 的本体会静默丢掉这个字段，于是页面永远打不开而没有任何一方报错 —— 那正是版本守卫要挡住的情况。
+
 ## 下一步领域命令草案
 
 统一命令信封：`{ requestId, workspaceId, source: 'ui' | 'agent', runId?, expectedVersion?, input }`。修改命令接受 idempotencyKey；命令来源在可信边界标记，不相信客户端自报权限。

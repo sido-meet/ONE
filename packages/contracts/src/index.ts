@@ -1,6 +1,7 @@
 export * from './errors.ts';
 export * from './domain.ts';
 export * from './provider.ts';
+export * from './page.ts';
 export * from './wire.ts';
 
 /** ONE-owned identities; external agent sessions are never conversation IDs. */

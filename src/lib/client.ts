@@ -80,6 +80,7 @@ function placeholderLink(): CoreClient {
     listClients: noLink,
     launch: noLink,
     callCapability: noLink,
+    callCommand: noLink,
     expose: () => undefined,
     dispose: () => undefined,
   };
@@ -174,7 +175,11 @@ const helloFor = (self: ClientIdentity): ClientMessage => ({
 /** Views must never mount before this resolves: `link` is the only state path. */
 export async function startClient(): Promise<ClientIdentity> {
   const self = await clientIdentity();
-  const started = createCoreClient(channelFor(self), helloFor(self));
+  // 只有主窗口握手。只读窗口（对话条、插件页面）向壳要重放：它们与主窗口共用
+  // 一根管道，各握一次手的话本体只认第一次（ADR-013）。
+  const started = createCoreClient(channelFor(self), helloFor(self), {
+    handshake: self.windowRole === 'primary',
+  });
   identity = self;
   link = started;
   client = started.client;

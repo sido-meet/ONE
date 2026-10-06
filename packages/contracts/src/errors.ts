@@ -18,6 +18,23 @@ export type ErrorCode =
   | 'TIMEOUT'
   | 'INTERNAL';
 
+const ERROR_CODES: ErrorCode[] = [
+  'NOT_FOUND',
+  'BUSY',
+  'VALIDATION',
+  'DISPOSED',
+  'CONFLICT',
+  'UNAVAILABLE',
+  'PERMISSION_DENIED',
+  'TIMEOUT',
+  'INTERNAL',
+];
+
+/** Untrusted input: a code that is not one of ours is no code at all. */
+export function isErrorCode(value: unknown): value is ErrorCode {
+  return typeof value === 'string' && ERROR_CODES.includes(value as ErrorCode);
+}
+
 export class ClientError extends Error {
   readonly code: ErrorCode;
   /** Machine-readable context for the UI, e.g. both versions on a conflict. */

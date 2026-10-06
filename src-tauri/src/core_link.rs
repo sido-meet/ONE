@@ -1,15 +1,17 @@
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::System::Pipes::PeekNamedPipe;
 
@@ -47,6 +49,14 @@ pub struct CoreStatus {
     pub core_version: Option<String>,
 }
 
+/// 本体拒绝了一个请求时给出的失败。code 保留下来是为了让调用方把「没运行」「没这个
+/// 页面」「版本对不上」翻译成不同的界面，而不是合成一句「出了点问题」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreFailure {
+    pub code: String,
+    pub message: String,
+}
+
 pub struct CoreLink {
     role: String,
     provider: String,
@@ -60,6 +70,12 @@ pub struct CoreLink {
     /// 菜单动作由壳发起，界面上没有回执框，因此壳自己认领这些 id。
     shell_pending: Mutex<HashSet<String>>,
     shell_seq: Mutex<u64>,
+    /// 壳自己发起、要等回执的请求（取插件页面、查名册）。回执由读线程投递，
+    /// 所以这里只能放一个发送端：放不下的调用会立刻看到失败，而不是等一个
+    /// 永远不会来的回执。
+    waiting: Mutex<HashMap<String, mpsc::Sender<Result<Value, CoreFailure>>>>,
+    /// 本体最近发过的 welcome / state / roster，供后开的只读窗口重放。
+    last_frames: Mutex<Vec<String>>,
 }
 
 impl CoreLink {
@@ -81,7 +97,71 @@ impl CoreLink {
         *seq += 1;
         let id = format!("shell-{}", *seq);
         self.shell_pending.lock().unwrap().insert(id.clone());
+        eprintln!("one: 壳发起 {id}");
         id
+    }
+
+    /**
+     * 发一帧并等它的回执。菜单与自定义协议要用它 —— 那两处都在 webview 之外，
+     * 没有界面可以渲染一个 Promise，只能同步拿到结果或者拿到一句失败。
+     *
+     * 阻塞的是调用方那一根线程（协议处理器、菜单处理），读管道的那根不受影响：
+     * 它把回执投进 channel，这里醒来。两处共用同一个 id 前缀 `shell-`，因此不会
+     * 和界面的请求撞号。
+     */
+    pub fn request(&self, frame: Value, timeout: Duration) -> Result<Value, CoreFailure> {
+        let Some(id) = frame.get("id").and_then(Value::as_str).map(str::to_string) else {
+            return Err(CoreFailure {
+                code: "VALIDATION".into(),
+                message: "壳发起的请求必须带 id".into(),
+            });
+        };
+        let (sender, receiver) = mpsc::channel();
+        {
+            let mut waiting = self.waiting.lock().unwrap();
+            // 同一个 id 已经有主人在等：撞号说明有 bug，宁可立刻失败也别丢掉两份回执。
+            if waiting.contains_key(&id) {
+                return Err(CoreFailure {
+                    code: "CONFLICT".into(),
+                    message: format!("请求 {id} 已经在等待回执"),
+                });
+            }
+            waiting.insert(id.clone(), sender);
+        }
+        if let Err(error) = send(self, &frame) {
+            self.forget(&id);
+            return Err(CoreFailure {
+                code: "UNAVAILABLE".into(),
+                message: error,
+            });
+        }
+        let outcome = receiver.recv_timeout(timeout);
+        self.forget(&id);
+        match outcome {
+            Ok(answer) => answer,
+            Err(_) => Err(CoreFailure {
+                code: "TIMEOUT".into(),
+                message: "ONE 本体没有回应，请确认它还在运行".into(),
+            }),
+        }
+    }
+
+    fn forget(&self, id: &str) {
+        self.waiting.lock().unwrap().remove(id);
+    }
+
+    /// A departing core must not leave a caller waiting past its own timeout.
+    fn fail_all(&self, code: &str, message: &str) {
+        let waiting: Vec<mpsc::Sender<Result<Value, CoreFailure>>> = {
+            let mut guard = self.waiting.lock().unwrap();
+            guard.drain().map(|(_, sender)| sender).collect()
+        };
+        for sender in waiting {
+            let _ = sender.send(Err(CoreFailure {
+                code: code.to_string(),
+                message: message.to_string(),
+            }));
+        }
     }
 
     /// Reports the outcome of a shell-initiated request once, then forgets it.
@@ -139,6 +219,46 @@ pub fn send_frame(link: &CoreLink, frame: Value) -> Result<(), String> {
     send(link, &frame)
 }
 
+/// 只读窗口没有自己的握手，靠重放本体最近几帧拿到状态与名册。
+///
+/// 一个客户端进程只有一次握手（ADR-013：客户端是进程，窗口只是它的屏幕），
+/// 所以后开的窗口必须从壳这里补上它错过的那几帧 —— 否则它会永远停在
+/// "正在连接"，而本体明明是通的。
+#[tauri::command]
+pub fn core_replay(
+    app: AppHandle,
+    window: WebviewWindow,
+    link: State<'_, CoreLink>,
+) -> Result<(), String> {
+    let frames = link.last_frames.lock().map_err(|error| error.to_string())?;
+    for frame in frames.iter() {
+        let _ = app.emit_to(window.label(), "core:message", frame.clone());
+    }
+    Ok(())
+}
+
+/// 记住本体最近发过的握手、状态与名册，供后开的窗口重放。其它帧不进这里：
+/// 重放一条命令的回执会让界面以为那个请求是自己发的。
+fn remember_frame(link: &CoreLink, line: &str) {
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
+    let kind = value.get("t").and_then(Value::as_str).unwrap_or("");
+    if !matches!(kind, "welcome" | "state" | "roster") {
+        return;
+    }
+    let Ok(mut frames) = link.last_frames.lock() else {
+        return;
+    };
+    frames.retain(|item| {
+        serde_json::from_str::<Value>(item)
+            .ok()
+            .and_then(|item| item.get("t").and_then(Value::as_str).map(str::to_string))
+            != Some(kind.to_string())
+    });
+    frames.push(line.to_string());
+}
+
 /// 菜单在 webview 之外，所以壳自己也要能向本体发帧：拉起另一个客户端只能
 /// 走本体，壳不直接 spawn 客户端进程。
 pub fn send_command(app: &AppHandle, frame: Value) -> Result<(), String> {
@@ -163,8 +283,46 @@ fn forward_line(app: &AppHandle, line: &str) {
     if let Some(link) = app.try_state::<CoreLink>() {
         note_core_version(&link, line);
         link.log_shell_result(line);
+        deliver_shell_answer(&link, line);
+        remember_frame(&link, line);
     }
     let _ = app.emit("core:message", line.to_string());
+}
+
+/// 把回执交给在等它的那根线程。id 不在册就说明这是界面的请求，原样走事件流 ——
+/// 两边共用同一根管道，靠 id 前缀区分是谁的。
+fn deliver_shell_answer(link: &CoreLink, line: &str) {
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
+    if value.get("t").and_then(Value::as_str) != Some("result") {
+        return;
+    }
+    let Some(id) = value.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(sender) = link.waiting.lock().unwrap().remove(id) else {
+        return;
+    };
+    let answer = if value.get("ok").and_then(Value::as_bool) == Some(true) {
+        Ok(value.get("value").cloned().unwrap_or(Value::Null))
+    } else {
+        let error = value.get("error");
+        Err(CoreFailure {
+            code: error
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str)
+                .unwrap_or("INTERNAL")
+                .to_string(),
+            message: error
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("本体处理失败")
+                .to_string(),
+        })
+    };
+    // 对方可能已经超时走了；发不出去不是错误，回执本身已经用完。
+    let _ = sender.send(answer);
 }
 
 /// 不阻塞地问一句管道里还有多少字节。没有数据时立即返回，而不是等。
@@ -330,6 +488,8 @@ fn spawn_pipe_reader(app: AppHandle) {
                     *link.writer.lock().unwrap() = None;
                     *link.core_version.lock().unwrap() = None;
                     link.shell_pending.lock().unwrap().clear();
+                    // 还在等回执的调用不能陪着一起等超时：连接已经断了。
+                    link.fail_all("UNAVAILABLE", "ONE 本体没有连接");
                     let status = link.status();
                     let _ = app.emit("core:status", status);
                 }
@@ -358,12 +518,68 @@ pub fn start_bridge(
         connected: Mutex::new(false),
         shell_pending: Mutex::new(HashSet::new()),
         shell_seq: Mutex::new(0),
+        waiting: Mutex::new(HashMap::new()),
+        last_frames: Mutex::new(Vec::new()),
     });
     spawn_pipe_reader(app.clone());
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn link() -> std::sync::Arc<CoreLink> {
+        std::sync::Arc::new(CoreLink {
+            role: "pet".into(),
+            provider: "pet".into(),
+            label: "ONE 宠物".into(),
+            capabilities: Vec::new(),
+            wire_version: 3,
+            core_version: Mutex::new(None),
+            writer: Mutex::new(None),
+            connected: Mutex::new(false),
+            shell_pending: Mutex::new(HashSet::new()),
+            shell_seq: Mutex::new(0),
+            waiting: Mutex::new(HashMap::new()),
+            last_frames: Mutex::new(Vec::new()),
+        })
+    }
+
+    #[test]
+    fn only_the_frames_a_late_window_needs_are_kept_for_replay() {
+        // 只读窗口靠重放起步：welcome、状态、名册缺一不可，而命令回执绝对不能
+        // 重放 —— 界面会以为那个请求是自己发的。
+        let link = link();
+        remember_frame(&link, r#"{"t":"welcome","v":3,"clientId":"a","coreVersion":"test"}"#);
+        remember_frame(&link, r#"{"t":"state","revision":1,"snapshot":{}}"#);
+        remember_frame(&link, r#"{"t":"roster","participants":[],"installed":[]}"#);
+        remember_frame(&link, r#"{"t":"result","id":"r1","ok":true}"#);
+        remember_frame(&link, r#"{"t":"invoke","id":"r2","capability":"x"}"#);
+
+        let frames = link.last_frames.lock().unwrap();
+        let kinds: Vec<String> = frames
+            .iter()
+            .map(|frame| {
+                serde_json::from_str::<Value>(frame).unwrap()["t"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(kinds, vec!["welcome", "state", "roster"]);
+    }
+
+    #[test]
+    fn a_replayed_state_replaces_the_previous_one() {
+        // 名册与状态每次都重放最新的：缓存旧的那份会让后开的窗口对着过期世界
+        // 画界面，而它自己又没有理由收到下一次。
+        let link = link();
+        remember_frame(&link, r#"{"t":"state","revision":1,"snapshot":{}}"#);
+        remember_frame(&link, r#"{"t":"state","revision":2,"snapshot":{}}"#);
+        let frames = link.last_frames.lock().unwrap();
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].contains("\"revision\":2"));
+    }
     use super::*;
     use serde_json::json;
     use std::sync::Arc;

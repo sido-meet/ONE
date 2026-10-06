@@ -1,4 +1,7 @@
 import type { ErrorCode, Snapshot } from './index.ts';
+import { isErrorCode } from './errors.ts';
+import { isPagePath, parsePluginView } from './page.ts';
+import type { PluginView } from './page.ts';
 
 /**
  * Wire protocol between ONE core and any participant (docs/03, ADR-013/017).
@@ -9,8 +12,13 @@ import type { ErrorCode, Snapshot } from './index.ts';
  * 参与者的能力。
  *
  * 传输是有长度边界的逐行 JSON（Windows 命名管道），协议版本不兼容即拒绝。
+ *
+ * v3 的变化是参与者多申报了一件事：`view`。插件是「数据接口 + 自带页面」两件货
+ * （ADR-018），本体据此知道哪个寻址键能开页面，宿主据此决定能不能开窗。之所以要升
+ * 版本而不是加个可选字段：v2 的本体会**静默丢掉**这个字段，于是页面永远打不开而
+ * 没有任何一方报错 —— 那正是版本守卫要挡住的情况。
  */
-export const WIRE_VERSION = 2;
+export const WIRE_VERSION = 3;
 
 /**
  * 呈现角色，纯标签，core 不为它写任何特判：客户端报 pet / desktop / cli，领域
@@ -50,6 +58,11 @@ export interface ParticipantInfo {
   label: string;
   /** 形如 `bubble.open`、`calendar.create`，按字符串寻址。 */
   capabilities: string[];
+  /**
+   * 自带页面的入口（ADR-018）。只有真正提供页面的插件才申报，宿主不采信页面自报
+   * 的身份：这个字段连同窗口标签一起，决定这个窗口属于谁。
+   */
+  view?: PluginView;
 }
 
 export interface RosterEntry extends ParticipantInfo {
@@ -66,11 +79,17 @@ export type ClientMessage =
         provider: ProviderId;
         label: string;
         capabilities: string[];
+        view?: PluginView;
       };
     }
   | { t: 'call'; id: string; cmd: string; args: unknown[] }
   | { t: 'clients.list'; id: string }
   | { t: 'clients.launch'; id: string; provider: ProviderId }
+  /**
+   * 取插件页面的一段资源。宿主不自己找提供方要文件：这个请求必须经本体，好让本体
+   * 用它那份权威名册确认对方**确实**申报过页面与 `page.read`（ADR-016/018）。
+   */
+  | { t: 'page.read'; id: string; provider: ProviderId; path: string }
   | {
       t: 'capability.call';
       id: string;
@@ -79,7 +98,18 @@ export type ClientMessage =
       args?: unknown;
     }
   | { t: 'capability.result'; id: string; ok: true; value?: unknown }
-  | { t: 'capability.result'; id: string; ok: false; message: string }
+  /**
+   * `code` 是可选的，但带上才有意义：被调用的参与者如果不报码，本体只能按
+   * INTERNAL 处理，而本体与壳正是靠码把「没这个文件」「没运行」「没授权」
+   * 分开说（ADR-016）。少了它，一个 NOT_FOUND 到壳那里会变成 502。
+   */
+  | {
+      t: 'capability.result';
+      id: string;
+      ok: false;
+      message: string;
+      code?: ErrorCode;
+    }
   | { t: 'ping' };
 
 /** core → 客户端 */
@@ -148,6 +178,8 @@ export function parseClientMessage(value: unknown): ClientMessage | null {
             (item): item is string => typeof item === 'string',
           )
         : [];
+      // 申报了页面却没有合法入口，等于没申报：静默降级会让宿主开出一个空窗口。
+      const view = parsePluginView(client.view);
       return {
         t: 'hello',
         v: value.v,
@@ -156,6 +188,7 @@ export function parseClientMessage(value: unknown): ClientMessage | null {
           provider: client.provider,
           label: client.label.slice(0, 64),
           capabilities: capabilities.slice(0, 32),
+          ...(view ? { view } : {}),
         },
       };
     }
@@ -171,6 +204,16 @@ export function parseClientMessage(value: unknown): ClientMessage | null {
       if (typeof value.id !== 'string' || !value.id) return null;
       if (!isProviderId(value.provider)) return null;
       return { t: 'clients.launch', id: value.id, provider: value.provider };
+    case 'page.read':
+      if (typeof value.id !== 'string' || !value.id) return null;
+      if (!isProviderId(value.provider)) return null;
+      if (!isPagePath(value.path)) return null;
+      return {
+        t: 'page.read',
+        id: value.id,
+        provider: value.provider,
+        path: value.path,
+      };
     case 'capability.call':
       if (typeof value.id !== 'string' || !value.id) return null;
       if (!isProviderId(value.target)) return null;
@@ -194,11 +237,13 @@ export function parseClientMessage(value: unknown): ClientMessage | null {
           value: value.value,
         };
       if (typeof value.message !== 'string') return null;
+      const code = isErrorCode(value.code) ? value.code : undefined;
       return {
         t: 'capability.result',
         id: value.id,
         ok: false,
         message: value.message.slice(0, 200),
+        ...(code ? { code } : {}),
       };
     case 'ping':
       return { t: 'ping' };
@@ -277,7 +322,13 @@ export function parseCoreMessage(value: unknown): CoreMessage | null {
         return null;
       return {
         t: 'roster',
-        participants: value.participants.filter(isRosterEntry),
+        participants: value.participants.filter(isRosterEntry).map((entry) => {
+          // 名册是本体给的权威事实，页面入口仍然要过一遍路径守卫：宿主会把它拼进
+          // one-plugin:// 地址，坏路径在这里就该挡住，而不是等开窗才失败。
+          const { view, ...rest } = entry;
+          const parsed = parsePluginView(view);
+          return { ...rest, ...(parsed ? { view: parsed } : {}) };
+        }),
         installed: value.installed.filter(isProviderId),
       };
     case 'invoke':

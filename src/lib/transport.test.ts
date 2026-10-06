@@ -4,12 +4,108 @@ import { createCore } from '../../core/src/core';
 import { CAPABILITY, WIRE_VERSION } from '../../packages/contracts/src/wire';
 import type { ClientMessage } from '../../packages/contracts/src/wire';
 import { createMemoryCoreChannel } from './transport';
+import { createCoreClient } from './core-link';
 
 /**
  * 进程内通道的行为（ADR-013）。浏览器预览和宠物端的测试都跑在这上面，
  * 因此这里要守住"和命名管道完全一致"：第一帧握手，之后每帧都是命令，
  * 状态是本体的而不是通道自己编的。
  */
+
+describe('一根管道只有一次握手', () => {
+  it('只读窗口不握手，而是向壳要重放', async () => {
+    // 实机踩到：插件页面窗口与宠物主窗口共用一根管道，两个窗口各握一次手，
+    // 本体只认第一次 —— 只读窗口既拿不到回执，也等不到下一次握手，
+    // 于是永远停在「ONE 本体未连接」。
+    const core = createCore(createMockClient(), { version: 'test' });
+    const hello: ClientMessage = {
+      t: 'hello',
+      v: WIRE_VERSION,
+      client: {
+        role: 'pet',
+        provider: 'pet',
+        label: 'ONE 宠物',
+        capabilities: [CAPABILITY.bubbleOpen],
+      },
+    };
+    const sent: string[] = [];
+    let replays = 0;
+    const status = {
+      connected: true,
+      role: 'pet',
+      provider: 'pet',
+      label: 'ONE 宠物',
+      capabilities: [CAPABILITY.bubbleOpen],
+      wireVersion: WIRE_VERSION,
+      coreVersion: 'test',
+    };
+    const listeners: ((line: string) => void)[] = [];
+    const channel = {
+      connection: async () => status,
+      send: async (frame: ClientMessage) => {
+        sent.push(frame.t);
+      },
+      onFrame: (handler: (line: string) => void) => {
+        listeners.push(handler);
+        return () => undefined;
+      },
+      onStatus: () => () => undefined,
+      replay: async () => {
+        replays += 1;
+      },
+    };
+    const view = createCoreClient(channel, hello, { handshake: false });
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(sent, '只读窗口绝不能自己握手').toEqual([]);
+    expect(replays, '它要向壳要重放').toBe(1);
+    // 重放回来的帧照常解释：welcome 让它从"正在连接"走到"已连接"。
+    listeners[0]?.(
+      JSON.stringify({
+        t: 'welcome',
+        v: WIRE_VERSION,
+        clientId: 'x',
+        coreVersion: 'test',
+      }),
+    );
+    expect(view.state()).toBe('ready');
+  });
+
+  it('主窗口照旧握手一次', async () => {
+    const core = createCore(createMockClient(), { version: 'test' });
+    const hello: ClientMessage = {
+      t: 'hello',
+      v: WIRE_VERSION,
+      client: {
+        role: 'pet',
+        provider: 'pet',
+        label: 'ONE 宠物',
+        capabilities: [],
+      },
+    };
+    const sent: string[] = [];
+    const channel = {
+      connection: async () => ({
+        connected: true,
+        role: 'pet',
+        provider: 'pet',
+        label: 'ONE 宠物',
+        capabilities: [],
+        wireVersion: WIRE_VERSION,
+        coreVersion: 'test',
+      }),
+      send: async (frame: ClientMessage) => {
+        sent.push(frame.t);
+      },
+      onFrame: () => () => undefined,
+      onStatus: () => () => undefined,
+    };
+    createCoreClient(channel, hello);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(sent).toEqual(['hello']);
+    void core;
+  });
+});
 
 function setup() {
   const core = createCore(createMockClient(), { version: 'test' });

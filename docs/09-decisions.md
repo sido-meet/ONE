@@ -134,13 +134,13 @@ export type ClientKind = 'pet' | 'desktop' | 'cli';
 
 **验证证据**：`core/src/wire-v2.test.ts` 12 项。关键几条是旧协议做不到的：日历提供方以 `role=provider, provider=local.calendar` 握手并进入名册；两个 `role` 相同但 `provider` 不同的提供方互不顶掉；同名能力（`window.show`）在宠物与日历之间各投各的；v1 的 hello 连解析层都过不去；寻址键拒绝空格、斜杠与大写 —— 它会进日志、进命令行、进 `one-plugin://` 的 host 部分。Rust 侧 12 项单测，其中 `capability_names_carry_no_implementation_prefix` 把能力名字面量写死，与 TS 侧 `CAPABILITY` 互为对照，改错一边就会红。
 
-**迁移影响**：`WIRE_VERSION` 1 → 2；`packages/contracts/src/wire.ts` 的解析与守卫；`core/src/core.ts` 的会话与名册；壳与前端同步升级。
+**迁移影响**：`WIRE_VERSION` 1 → 2；`packages/contracts/src/wire.ts` 的解析与守卫；`core/src/core.ts` 的会话与名册；壳与前端同步升级。**后续：2 → 3**（ADR-018 落地）—— 参与者多申报一个 `view`（自带页面入口），并新增 `page.read` 帧。之所以再升一次版本而不是加可选字段：v2 的本体会静默丢掉 `view`，于是页面永远打不开而没有任何一方报错。
 
 **重新评估条件**：若最终确定提供方只在本机安装，枚举可以接受 —— 但还差一条：本机的提供方**数量和实现并不固定**（本地文件、Outlook、Google 都可能只装其中一两个），枚举每加一种就要改协议。所以这条不因“只本机”而成立，它要求的是“种类可穷举”，而 ADR-016 要求的是“实现可替换”。
 
 ## ADR-018：插件自带页面，宿主提供窗口容器与权限裁决
 
-**日期**：2026-10（0.2.0-dev）　**状态**：接受（代码未动，见路线 D04/D05/D06）
+**日期**：2026-10（0.2.0-dev）　**状态**：接受（代码已落地，见路线 D04/D05/D06）
 
 **问题**：日历、记事本做成插件之后，宠物上方要能悬浮出摘要、点开看内容，宠物提供窗口去打开插件的页面。这逼出一个岔路口：**那块界面是插件画的，还是宿主画的？**
 
@@ -158,6 +158,12 @@ export type ClientKind = 'pet' | 'desktop' | 'cli';
 `one-plugin://<provider>/...`，由壳注册自定义协议，按 provider 转交给对应插件进程响应资源请求。不用 localhost HTTP 服务 —— 否则本体要管端口分配、冲突与插件崩溃后的回收，那是一整套独立的问题。插件进程崩了，页面加载失败，宿主显示明确错误，绝不留白屏。
 
 当前 CSP 是 `default-src 'self'`，`frame-src` 会回落到它，会直接挡住 `one-plugin:`，实现时必须一并放开。
+
+**实现时修正一处**：主机名用 `localhost` 而不是 `<provider>`，即 `one-plugin://localhost/local.calendar/calendar.html`。Windows 的 WebView2 不认非标准协议，wry 会先把地址改写成 `http://one-plugin.localhost/...` 再拦截（`custom_protocol_workaround`），寻址键放主机名会在这一步被改坏。寻址键因此放路径里。
+
+**实机再修正一处**：iframe 里要写的**不是** `one-plugin://` 原地址，而是改写后的 `http://one-plugin.localhost/...`。wry 的拦截只匹配那个前缀，而 iframe 走的是资源请求，写原地址压根到不了协议处理器 —— 表现是窗口开着、标题正确、内容一片空白。这个前缀是宿主的事，所以由壳通过 `client_identity` 的 `pluginPageBase` 告诉界面，而不是界面自己猜平台。
+
+**实现时补上第 5 条边界**：`sandbox` 属性挡得住 DOM 访问，挡不住页面自己发起网络请求。因此**插件页面自己的响应带一条 CSP**：`default-src 'none'`，`script-src`/`style-src` 只放行内联，`frame-ancestors` 只认宿主自己的两种来源。代价是插件页面必须是自包含单文件 —— 这是有意的，让插件作者不用再学一套打包。
 
 ### 宠物上方那条常驻摘要
 
@@ -180,8 +186,17 @@ export type ClientKind = 'pet' | 'desktop' | 'cli';
 
 **为什么必须现在定**：插件作者会按「我的页面长什么样」来设计。按错的假设写出去，之后回改要动所有插件。
 
-**验证证据**：暂无，属尚未实现。
+**验证证据**：`core/src/page-read.test.ts`（8 项，覆盖「没申报页面 / 没提供 page.read / 没在运行 / 答不上来 / 错误码一路传到界面」五种拒绝路径）、`src/lib/page-bridge.test.ts`（9 项，含「只认自己那个 iframe」与能力表与领域能力一一对应）、`packages/provider-local/src/pages.test.ts`（5 项，含目录穿越、跨身份串页与「页面不引用外部资源」）、`src-tauri/src/plugin.rs`（9 项，含寻址键守卫、窗口标签可逆编码、CSP 字面量、状态码分流）。实机验收记录在 `docs/06-roadmap.md` 的 D04 小节：页面在沙箱 iframe 里真的渲染出来，并列出已落盘的数据。
 
-**迁移影响**：`tauri.conf.json` 的 CSP 放开 `frame-src one-plugin:`；`main.rs` 增加插件窗口构建与自定义协议注册；壳侧新增消息桥；宠物端新增摘要窗口与布局仲裁；`Snapshot` 摘掉 `notes` / `calendarEvents`。
+**D04 实机抓到的六个问题**（都修了，且都补了回归测试）：
+
+1. **一个身份能读到另一个身份的页面**：两个身份共用一个 `pages` 根，向 `local.notes` 要 `calendar.html` 会把日历页面原样端出来。改成按身份分目录，分目录是边界不是整理。
+2. **提供方的错误码在管道上丢了**：`capability.result` 的失败帧只带一句话，本体只能按 INTERNAL 处理，于是「没有这个文件」到壳那里变成 502。现在失败帧带 `code`，一路传到 HTTP 状态码。
+3. **Tauri 不接受带 `.` 的窗口标签**：`plugin-local.calendar` 直接建不出窗口。标签改成可逆编码（`.`→`_`、`-`→`--`），保证不撞车。
+4. **新窗口被 ACL 挡在门外**：`capabilities/default.json` 按窗口标签授权，漏了 `plugin-*`，新窗口里 `plugin:event|listen` 直接被拒，界面停在「启动失败」。
+5. **一根管道只有一次握手**，而每个窗口都在握手：本体只认第一次，后开的窗口永远停在「正在连接」（对话条其实一直有这个问题，只是没人注意）。改成只有主窗口握手，只读窗口向壳要重放。
+6. **iframe 里写 `one-plugin://` 原地址永远加载不出来**：wry 的改写只认 `http://one-plugin.` 前缀，而 iframe 走的是资源请求，匹配不上。窗口开着、标题正确、内容一片空白 —— 现在由壳把平台相关的基址告诉界面（`pluginPageBase`）。
+
+**迁移影响**：`tauri.conf.json` 的 CSP 放开 `frame-src`（含 `http://one-plugin.localhost`）；`src-tauri/capabilities/default.json` 增加 `plugin-*`；`main.rs` 增加插件窗口构建与自定义协议注册；`src-tauri/src/plugin.rs` 是新文件；`core_link.rs` 增加重放缓存与 `core_replay`；前端新增 `page-bridge.ts`、`PluginWindow.svelte`，`CoreClient` 增加 `callCommand`；`Snapshot` 摘掉 `notes` / `calendarEvents`（D01 已做）。
 
 **重新评估条件**：若某类能力确实无法在 iframe 内表达（需要本地文件读写或高性能画布），才为它开独立 webview 的口子 —— 那时要重新审视权限与生命周期，不能默默开。若自定义协议在实际中不可靠，退回受控的 `blob:` / 内联资源注入，但同样不得放开 same-origin。

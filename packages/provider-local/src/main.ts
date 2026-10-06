@@ -2,8 +2,10 @@ import path from 'node:path';
 import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { ClientError } from '../../contracts/src/index.ts';
+import { PAGE_READ_CAPABILITY } from '../../contracts/src/page.ts';
 import { WIRE_VERSION } from '../../contracts/src/wire.ts';
 import type { ClientMessage, CoreMessage } from '../../contracts/src/wire.ts';
+import { PAGE_ENTRY, pageRoot, readPageResource } from './pages.ts';
 import { createLocalProvider } from './provider.ts';
 
 /**
@@ -33,7 +35,13 @@ const ACTIONS = ['list', 'create', 'update', 'remove'] as const;
 
 /** 一个提供方进程同时提供日历与笔记，但各连一根管道 —— 寻址键必须唯一。 */
 function connectAs(pipe: string, identity: { id: string; kind: string }) {
-  const capabilities = ACTIONS.map((action) => `${identity.kind}.${action}`);
+  const capabilities = [
+    ...ACTIONS.map((action) => `${identity.kind}.${action}`),
+    // 页面也是这个进程的一部分：它声明 page.read，本体才会把宿主的取页请求转过来。
+    PAGE_READ_CAPABILITY,
+  ];
+  // 资源根按身份分目录：一个身份读不到另一个身份的页面（实机抓到的串页）。
+  const pages = pageRoot(identity.kind);
   const pending = new Map<string, (message: CoreMessage) => void>();
   let welcomed = false;
 
@@ -63,6 +71,9 @@ function connectAs(pipe: string, identity: { id: string; kind: string }) {
           provider: identity.id,
           label: `本地${identity.kind === 'calendar' ? '日历' : '笔记'}`,
           capabilities,
+          // 自带页面（ADR-018）：本体据此知道这个寻址键能开页面，宿主据此决定
+          // 能不能开窗。页面目录按身份分开，两个身份不会串页。
+          view: { entry: PAGE_ENTRY },
         },
       };
       socket.write(`${JSON.stringify(hello)}\n`);
@@ -107,28 +118,40 @@ function connectAs(pipe: string, identity: { id: string; kind: string }) {
 
   /** 本体叫我们做事。答不回就等于让人干等，所以任何失败都必须回一句话。 */
   async function handleInvoke(message: Extract<CoreMessage, { t: 'invoke' }>) {
-    const action = message.capability.split('.')[1] ?? '';
     try {
+      if (message.capability === PAGE_READ_CAPABILITY) {
+        const asked = message.args as { path?: unknown } | undefined;
+        await ask({
+          t: 'capability.result',
+          id: message.id,
+          ok: true,
+          value: readPageResource(pages, asked?.path),
+        });
+        return;
+      }
+      // 能力名必须属于**本身份**。只取后半段的话，笔记身份会照办日历身份收到的
+      // `notes.list` —— 同一个进程里两份数据，于是日历窗口读得到笔记内容。
+      const action = message.capability.startsWith(`${identity.kind}.`)
+        ? message.capability.slice(identity.kind.length + 1)
+        : '';
       const payload = message.args as {
         context: Parameters<typeof provider.list>[0];
         input: unknown;
       };
       const method = provider[action as 'list'];
-      if (!method) throw new ClientError('NOT_FOUND', `没有实现 ${action}`);
+      if (!method)
+        throw new ClientError('NOT_FOUND', `没有实现 ${message.capability}`);
       const value = await method.call(provider, payload.context, payload.input);
       await ask({ t: 'capability.result', id: message.id, ok: true, value });
     } catch (error) {
-      const message_ =
-        error instanceof ClientError
-          ? error.message
-          : error instanceof Error
-            ? error.message
-            : '提供方处理失败';
+      // 码要一起发出去：本体与壳靠它把「没有这个文件」「没有授权」「里面坏了」
+      // 分开说，只发一句话的话，上游只能一律当成内部错误（ADR-016）。
       await ask({
         t: 'capability.result',
         id: message.id,
         ok: false,
-        message: message_,
+        code: error instanceof ClientError ? error.code : 'INTERNAL',
+        message: error instanceof Error ? error.message : '提供方处理失败',
       });
     }
   }

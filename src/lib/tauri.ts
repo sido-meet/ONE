@@ -41,6 +41,22 @@ export interface ClientIdentity {
   window: string;
   capabilities: string[];
   wireVersion: number;
+  /**
+   * 这个窗口是不是这个客户端的主窗口。一根管道只有一次握手（ADR-013），
+   * 只有主窗口握手；只读窗口向壳要重放，否则它会永远停在「正在连接」。
+   */
+  windowRole: 'primary' | 'view';
+  /**
+   * 这个窗口承载的是哪个插件的页面（ADR-018）。由壳的绑定表给出 —— 窗口与提供方
+   * 一一绑定，页面自己说了不算，也没法说。
+   */
+  pluginProvider: string | null;
+  /**
+   * 插件页面在 iframe 里要写的前缀，由壳按平台给出。Windows 上必须用 wry 改写
+   * 后的 `http://one-plugin.localhost`：iframe 的资源请求匹配不上原地址，
+   * 页面会安静地什么都不显示（ADR-018）。
+   */
+  pluginPageBase: string;
 }
 
 export function inTauri(): boolean {
@@ -62,6 +78,10 @@ export const shell = {
   startDrag: () => invoke('start_drag'),
   /** Keyboard equivalent of dragging, in logical pixels. */
   moveWindow: (dx: number, dy: number) => invoke('move_window', { dx, dy }),
+  /** 插件页面窗口与提供方一一绑定，这里交出去的是寻址键，不是页面给的地址。 */
+  openPluginPage: (provider: string) =>
+    invoke('open_plugin_page', { provider }),
+  closePluginWindow: () => invoke('close_plugin_window'),
   quit: () => invoke('quit_app'),
   /** Called by the shell after the view stopped what was running. */
   forceQuit: () => invoke('force_quit'),
@@ -107,41 +127,49 @@ function toConnection(value: unknown): CoreConnection {
 /**
  * 壳是管道与 WebView 之间唯一的桥：它把本体的每一行原样转过来，也把界面
  * 的每一帧原样送过去。界面看不到套接字。
+ *
+ * **监听必须先注册上，再去问状态**。`listen` 是异步的，而窗口可能在本体早就连上
+ * 之后才创建（对话条、插件页面窗口）：先问状态会立刻拿到"已连接"，握手随之
+ * 发出去，回执却比监听注册得更快，于是那一次 welcome 被漏掉，界面永远停在
+ * "正在连接"。顺序反过来就没有这个窗口（实机踩到：插件页面窗口永远显示
+ * 「本体未连接」，而本体明明是通的）。
  */
 export function tauriCoreChannel(): CoreChannel {
+  const frameListeners = new Set<(line: string) => void>();
+  const statusListeners = new Set<(status: CoreConnection) => void>();
+
+  const framesReady = listen<string>('core:message', (event) => {
+    for (const listener of frameListeners) listener(event.payload);
+  });
+  const statusReady = listen<unknown>('core:status', (event) => {
+    const status = toConnection(event.payload);
+    for (const listener of statusListeners) listener(status);
+  });
+
   return {
     async connection() {
+      // 先等监听到位，再问状态：这一刻之后进来的帧一个都不会漏。
+      await framesReady;
+      await statusReady;
       return toConnection(await invoke('core_status'));
     },
     async send(frame: ClientMessage) {
       await invoke('core_send', { frame });
     },
+    /** 只读窗口没有自己的握手，靠壳把本体最近几帧重放给自己。 */
+    async replay() {
+      await invoke('core_replay');
+    },
     onFrame(handler) {
-      let cancel: (() => void) | undefined;
-      let cancelled = false;
-      void listen<string>('core:message', (event) =>
-        handler(event.payload),
-      ).then((unlisten) => {
-        if (cancelled) unlisten();
-        else cancel = unlisten;
-      });
+      frameListeners.add(handler);
       return () => {
-        cancelled = true;
-        cancel?.();
+        frameListeners.delete(handler);
       };
     },
     onStatus(handler) {
-      let cancel: (() => void) | undefined;
-      let cancelled = false;
-      void listen<unknown>('core:status', (event) =>
-        handler(toConnection(event.payload)),
-      ).then((unlisten) => {
-        if (cancelled) unlisten();
-        else cancel = unlisten;
-      });
+      statusListeners.add(handler);
       return () => {
-        cancelled = true;
-        cancel?.();
+        statusListeners.delete(handler);
       };
     },
   };
@@ -159,6 +187,11 @@ export async function clientIdentity(): Promise<ClientIdentity> {
       window: pet ? 'pet' : 'main',
       capabilities: pet ? PET_CAPABILITIES : DESKTOP_CAPABILITIES,
       wireVersion: 0,
+      // 浏览器预览里每个窗口各有一套本体，握手不受管道限制。
+      windowRole: 'primary',
+      // 浏览器预览里没有插件协议的宿主方，插件页面在预览里打不开，如实说没有。
+      pluginProvider: null,
+      pluginPageBase: 'one-plugin://localhost',
     };
   }
   const value = await invoke<unknown>('client_identity');
@@ -175,6 +208,13 @@ export async function clientIdentity(): Promise<ClientIdentity> {
       : [],
     wireVersion:
       typeof record.wireVersion === 'number' ? record.wireVersion : 0,
+    windowRole: record.windowRole === 'view' ? 'view' : 'primary',
+    pluginProvider:
+      typeof record.pluginProvider === 'string' ? record.pluginProvider : null,
+    pluginPageBase:
+      typeof record.pluginPageBase === 'string'
+        ? record.pluginPageBase
+        : 'one-plugin://localhost',
   };
 }
 

@@ -107,3 +107,26 @@ Wasm 与开放插件市场只有实际需求和安全模型形成后再考虑。
 - **提供方少报一个能力，本体就不放行**（报 `not-authorized`）。宁可早失败，也不能让调用在半路才崩。
 
 管道服务端必须显式 `setEncoding('utf8')`（`core/src/pipe.ts`）：不定编码时每个 chunk 各自 toString，一个中文字的三个字节跨 chunk 边界就会被截成替换字符，帧越长越容易踩到。
+
+## 插件页面托管（ADR-018，已实现）
+
+插件是两件货：数据接口与自带页面。数据经本体调用（ADR-016），页面由壳托管进沙箱 iframe。宿主只做四件事 —— 开窗、转交资源请求、转发页面消息、在插件不在场时说清楚；界面归插件。
+
+**一条资源请求的完整路径**：
+
+```
+iframe src = one-plugin://localhost/local.calendar/calendar.html
+  → 壳的 one-plugin:// 处理器（src-tauri/src/plugin.rs）
+  → 本体 page.read（core/src/core.ts 的 handlePageRead）
+  → 提供方 page.read 能力（packages/provider-local/src/pages.ts）
+  → 文本回宿主 → 塞进 iframe
+```
+
+- **主机名必须是 `localhost`，不是 `<provider>`。** Windows 的 WebView2 不认非标准协议，wry 会先把 `one-plugin://localhost/...` 改写成 `http://one-plugin.localhost/...` 再拦截（见 wry 的 `custom_protocol_workaround`）。寻址键放主机名会在这一步被改坏，因此它只能放路径里。
+- **协议注册挂在 Builder 上，不在 AppHandle 上。** 注册晚于建窗，iframe 第一次请求就落空，表现为一块空白。窗口里再挂桥也没用，因为文档压根没加载。
+- **页面自带的 CSP 才是「没有网络」的执行处**（`plugin.rs` 的 `PAGE_CSP`）：`default-src 'none'` 一刀切掉外部资源与一切连接，`script-src` / `style-src` 只放行内联 —— 因此插件页面**必须是自包含单文件**。`frame-ancestors` 只认宿主自己的两种来源（`tauri.localhost` 与开发版 `127.0.0.1:1420`）。
+- **宿主给的 CSP 只是放行 frame-src，不是隔离。** 真正的隔离由 iframe 的 `sandbox="allow-scripts"`（没有 `allow-same-origin`）加上页面自己的 CSP 一起完成，两条少一条都不成立。
+
+**三种缺席说三句不同的话**（都在 `PluginWindow.svelte` 与 `plugin.rs` 里）：插件没运行 → 「日历源没有连上」；连着但没申报页面 → 「这个插件没有自带页面」；资源取不到 → 协议返回一个说得清原因的文字页面，而不是留白。三者的 HTTP 状态码也分开（404 / 503 / 502），便于排查。
+
+**一根管道只有一次握手**（实机踩到，之前一直没人写下来）：一个客户端进程里的多个窗口共用一根管道，因此**只有主窗口握手**。对话条、插件页面窗口都向壳要 `core_replay` —— 壳缓存本体最近几帧 `welcome` / `state` / `roster`，新窗口注册完监听再要一次。少了这一步，后开的窗口会永远停在「本体未连接」：它发的 `hello` 本体根本不认（只认第一次），而那一次 `welcome` 又早在它挂载前就过去了。命令回执**不能**重放：界面会以为那个请求是自己发的。
