@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createMockClient } from '../../packages/mock-runtime/src/index';
 import { createCore } from '../../core/src/core';
-import { WIRE_VERSION } from '../../packages/contracts/src/wire';
+import { CAPABILITY, WIRE_VERSION } from '../../packages/contracts/src/wire';
 import type { ClientMessage } from '../../packages/contracts/src/wire';
 import { createMemoryCoreChannel } from './transport';
 
@@ -16,7 +16,12 @@ function setup() {
   const hello: ClientMessage = {
     t: 'hello',
     v: WIRE_VERSION,
-    client: { kind: 'pet', label: 'test', capabilities: ['pet.bubble.open'] },
+    client: {
+      role: 'pet',
+      provider: 'pet',
+      label: 'test',
+      capabilities: [CAPABILITY.bubbleOpen],
+    },
   };
   const lines: string[] = [];
   const statuses: boolean[] = [];
@@ -24,9 +29,10 @@ function setup() {
     core,
     hello,
     connection: {
-      kind: 'pet',
+      role: 'pet',
+      provider: 'pet',
       label: 'test',
-      capabilities: ['pet.bubble.open'],
+      capabilities: [CAPABILITY.bubbleOpen],
       wireVersion: WIRE_VERSION,
       coreVersion: 'test',
     },

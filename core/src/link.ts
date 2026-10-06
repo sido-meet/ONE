@@ -1,8 +1,9 @@
 import net from 'node:net';
 import type {
-  ClientKind,
   ClientMessage,
   CoreMessage,
+  ParticipantRole,
+  ProviderId,
 } from '../../packages/contracts/src/wire.ts';
 
 export const DEFAULT_PIPE = '\\\\.\\pipe\\one-core';
@@ -19,7 +20,8 @@ export interface ClientLink {
  * 因此"换个呈现形式"不需要重写协议代码。
  */
 export function connectToCore(options: {
-  kind: ClientKind;
+  role: ParticipantRole;
+  provider: ProviderId;
   label: string;
   capabilities: string[];
   version: number;
@@ -40,7 +42,8 @@ export function connectToCore(options: {
           t: 'hello',
           v: options.version,
           client: {
-            kind: options.kind,
+            role: options.role,
+            provider: options.provider,
             label: options.label,
             capabilities: options.capabilities,
           },

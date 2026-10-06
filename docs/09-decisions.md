@@ -101,9 +101,9 @@
 
 ## ADR-017：协议拆开角色、寻址与可启动性
 
-**日期**：2026-10（0.2.0-dev）　**状态**：接受（代码未动，见路线 D01）
+**日期**：2026-10（0.2.0-dev）　**状态**：接受（D02 已落地，12 项协议回归测试）
 
-**问题**：ADR-016 要求提供方能注册、能被寻址。但 `wire.ts:15` 现在写的是
+**问题**：ADR-016 要求提供方能注册、能被寻址。但 `wire.ts:15` 原来写的是
 
 ```ts
 export type ClientKind = 'pet' | 'desktop' | 'cli';
@@ -132,7 +132,7 @@ export type ClientKind = 'pet' | 'desktop' | 'cli';
 
 **为什么必须现在定**：能力名和寻址方式是全链路的，越晚改，调用点越多。拖到有第二个提供方之后再改，会同时动协议、本体、壳和前端四层。
 
-**验证证据**：暂无，属尚未实现。
+**验证证据**：`core/src/wire-v2.test.ts` 12 项。关键几条是旧协议做不到的：日历提供方以 `role=provider, provider=local.calendar` 握手并进入名册；两个 `role` 相同但 `provider` 不同的提供方互不顶掉；同名能力（`window.show`）在宠物与日历之间各投各的；v1 的 hello 连解析层都过不去；寻址键拒绝空格、斜杠与大写 —— 它会进日志、进命令行、进 `one-plugin://` 的 host 部分。Rust 侧 12 项单测，其中 `capability_names_carry_no_implementation_prefix` 把能力名字面量写死，与 TS 侧 `CAPABILITY` 互为对照，改错一边就会红。
 
 **迁移影响**：`WIRE_VERSION` 1 → 2；`packages/contracts/src/wire.ts` 的解析与守卫；`core/src/core.ts` 的会话与名册；壳与前端同步升级。
 

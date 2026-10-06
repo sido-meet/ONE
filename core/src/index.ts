@@ -7,8 +7,8 @@ import {
   createMockClient,
 } from '../../packages/mock-runtime/src/index.ts';
 import { PROVIDER_CONTRACT_VERSION } from '../../packages/contracts/src/index.ts';
-import { isClientKind } from '../../packages/contracts/src/wire.ts';
-import type { ClientKind } from '../../packages/contracts/src/index.ts';
+import { isProviderId } from '../../packages/contracts/src/wire.ts';
+import type { ProviderId } from '../../packages/contracts/src/index.ts';
 import { createCore } from './core.ts';
 import { PIPE_PATH, serveOnPipe } from './pipe.ts';
 
@@ -20,32 +20,32 @@ const version = '0.2.0-dev';
  * 0.1 还没有安装器，因此用环境变量代替：默认只装了宠物，写成
  * ONE_INSTALLED=pet,desktop 就表示桌面端也装了。
  */
-function readInstalled(): ClientKind[] {
+function readInstalled(): ProviderId[] {
   const raw = process.env.ONE_INSTALLED;
   if (!raw) return ['pet'];
-  const kinds = raw
+  const providers = raw
     .split(',')
     .map((item) => item.trim())
-    .filter(isClientKind);
-  return kinds.length ? kinds : ['pet'];
+    .filter(isProviderId);
+  return providers.length ? providers : ['pet'];
 }
 
 /**
- * 启动器由宿主注入：core 只知道"要启动一个 pet / desktop 客户端"，不关心它是
- * pnpm 脚本、打包后的 exe 还是别的什么。0.1 用脚本代替安装器。
+ * 启动器由宿主注入：core 只知道"要启动一个寻址键"，不关心它是 pnpm 脚本、
+ * 打包后的 exe 还是别的什么。0.1 用脚本代替安装器。
+ *
+ * 注意 core 不为 provider 写特判 —— 它连 pet 和 desktop 的区别都不知道，
+ * 只把寻址键交给宿主。日历提供方将来也走同一条路（ADR-016/017）。
  */
-async function launchClient(kind: ClientKind) {
-  const script = kind === 'desktop' ? 'client:desktop' : 'client:pet';
-  const child = spawn('pnpm', [script], {
+async function launchClient(provider: ProviderId) {
+  const child = spawn('pnpm', [`client:${provider}`], {
     cwd: repoRoot,
     detached: true,
     stdio: 'ignore',
     shell: true,
   });
   child.on('error', (error) => {
-    process.stderr.write(
-      `ONE 本体：拉起 ${kind} 客户端失败：${error.message}\n`,
-    );
+    process.stderr.write(`ONE 本体：拉起 ${provider} 失败：${error.message}\n`);
   });
   child.unref();
 }

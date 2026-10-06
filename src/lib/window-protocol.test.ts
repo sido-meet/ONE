@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createMockClient } from '../../packages/mock-runtime/src/index';
 import { createCore } from '../../core/src/core';
-import { WIRE_VERSION } from '../../packages/contracts/src/wire';
+import { CAPABILITY, WIRE_VERSION } from '../../packages/contracts/src/wire';
 import type {
-  ClientKind,
   ClientMessage,
+  CoreMessage,
 } from '../../packages/contracts/src/wire';
 import { createCoreClient, EMPTY_SNAPSHOT } from './core-link';
 import type { CoreChannel, CoreClient } from './core-link';
@@ -22,7 +22,7 @@ interface Peer {
 }
 
 function peer(
-  kind: ClientKind,
+  provider: string,
   capabilities: string[],
   core = createCore(createMockClient(), {
     version: 'test',
@@ -32,7 +32,12 @@ function peer(
   const hello: ClientMessage = {
     t: 'hello',
     v: WIRE_VERSION,
-    client: { kind, label: `test ${kind}`, capabilities },
+    client: {
+      role: provider,
+      provider,
+      label: `test ${provider}`,
+      capabilities,
+    },
   };
   const received: ClientMessage[] = [];
   const link = createCoreClient(
@@ -40,8 +45,9 @@ function peer(
       core,
       hello,
       connection: {
-        kind,
-        label: `test ${kind}`,
+        role: provider,
+        provider,
+        label: `test ${provider}`,
         capabilities,
         wireVersion: WIRE_VERSION,
         coreVersion: 'test',
@@ -57,12 +63,18 @@ function offlineClient(): { link: CoreClient; hello: ClientMessage } {
   const hello: ClientMessage = {
     t: 'hello',
     v: WIRE_VERSION,
-    client: { kind: 'pet', label: 'test pet', capabilities: [] },
+    client: {
+      role: 'pet',
+      provider: 'pet',
+      label: 'test pet',
+      capabilities: [],
+    },
   };
   const offline: CoreChannel = {
     connection: async () => ({
       connected: false,
-      kind: 'pet',
+      role: 'pet',
+      provider: 'pet',
       label: 'test pet',
       capabilities: [],
       wireVersion: WIRE_VERSION,
@@ -75,7 +87,8 @@ function offlineClient(): { link: CoreClient; hello: ClientMessage } {
     onStatus: (handler) => {
       handler({
         connected: false,
-        kind: 'pet',
+        role: 'pet',
+        provider: 'pet',
         label: 'test pet',
         capabilities: [],
         wireVersion: WIRE_VERSION,
@@ -128,14 +141,20 @@ describe('core 客户端', () => {
     const hello: ClientMessage = {
       t: 'hello',
       v: WIRE_VERSION + 99,
-      client: { kind: 'pet', label: '旧客户端', capabilities: [] },
+      client: {
+        role: 'pet',
+        provider: 'pet',
+        label: '旧客户端',
+        capabilities: [],
+      },
     };
     const link = createCoreClient(
       createMemoryCoreChannel({
         core,
         hello,
         connection: {
-          kind: 'pet',
+          role: 'pet',
+          provider: 'pet',
           label: '旧客户端',
           capabilities: [],
           wireVersion: WIRE_VERSION + 99,
@@ -165,16 +184,134 @@ describe('core 客户端', () => {
 
   it('客户端只回答自己声明过的能力', async () => {
     const core = createCore(createMockClient(), { version: 'test' });
-    const pet = peer('pet', ['pet.bubble.open'], core);
-    pet.link.expose('pet.bubble.open', () => '打开了');
+    const pet = peer('pet', [CAPABILITY.bubbleOpen], core);
+    pet.link.expose(CAPABILITY.bubbleOpen, () => '打开了');
     const desktop = peer('desktop', [], core);
     await vi.waitFor(() => expect(desktop.link.state()).toBe('ready'));
     await expect(
-      desktop.link.callCapability('pet', 'pet.bubble.open'),
+      desktop.link.callCapability('pet', CAPABILITY.bubbleOpen),
     ).resolves.toBe('打开了');
     await expect(
-      desktop.link.callCapability('pet', 'pet.hide'),
+      desktop.link.callCapability('pet', CAPABILITY.windowHide),
     ).rejects.toThrow(/没有提供/);
+  });
+
+  it('同一会话里没注册能力的窗口必须保持沉默', async () => {
+    // 宠物进程有宠物窗口和对话条窗口，两者共用一根管道，因此**每个窗口都会
+    // 收到 invoke**。对话条声明的能力是空的，若它抢先回一句「本客户端没有
+    // 提供」，本体只认第一个回执，于是调用会被自己的另一块屏幕判死。
+    const core = createCore(createMockClient(), { version: 'test' });
+    const hello: ClientMessage = {
+      t: 'hello',
+      v: WIRE_VERSION,
+      client: {
+        role: 'pet',
+        provider: 'pet',
+        label: 'ONE 宠物',
+        capabilities: [CAPABILITY.bubbleOpen],
+      },
+    };
+    // 两个窗口共用同一个 channel —— 这正是壳里单例 CoreLink 的形状。
+    const channel = createMemoryCoreChannel({
+      core,
+      hello,
+      connection: {
+        role: 'pet',
+        provider: 'pet',
+        label: 'ONE 宠物',
+        capabilities: [CAPABILITY.bubbleOpen],
+        wireVersion: WIRE_VERSION,
+        coreVersion: 'test',
+      },
+    });
+    // 对话条窗口**先**挂载。注册顺序写死在这里，断言的是「本体最终收到什么」，
+    // 不依赖真实运行时那场竞态的先后 —— 只要对话条回了一句失败，本体就只认
+    // 这一条，宠物窗口真正的应答会被丢掉。
+    const bubbleWindow = createCoreClient(channel, hello);
+    const petWindow = createCoreClient(channel, hello);
+    petWindow.expose(CAPABILITY.bubbleOpen, () => '打开了');
+    void bubbleWindow.state();
+    void petWindow.state();
+    await vi.waitFor(() => expect(core.roster()).toHaveLength(1));
+
+    // 以命令行视角发一次调用，只看本体把什么回给了调用方。
+    const answers: CoreMessage[] = [];
+    const cli = core.connect(
+      {
+        send: (message: CoreMessage) => answers.push(message),
+        close: () => undefined,
+      },
+      {
+        t: 'hello',
+        v: WIRE_VERSION,
+        client: {
+          role: 'cli',
+          provider: 'cli',
+          label: '命令行',
+          capabilities: [],
+        },
+      },
+    );
+    if (!cli) throw new Error('cli 握手被拒');
+    core.handleMessage(cli, {
+      t: 'capability.call',
+      id: 'x',
+      target: 'pet',
+      capability: CAPABILITY.bubbleOpen,
+    });
+
+    await vi.waitFor(() =>
+      expect(answers.filter((message) => message.t === 'result')).toHaveLength(
+        1,
+      ),
+    );
+    expect(
+      answers.filter((message) => message.t === 'result')[0],
+    ).toMatchObject({ id: 'x', ok: true, value: '打开了' });
+  });
+
+  it('异步能力要等它落地再回，不能把 Promise 当结果发出去', async () => {
+    // 实机验收抓到的：多数能力要过壳，都是 async。直接发 Promise 会被
+    // JSON.stringify 变成 `{}`，调用方拿到「成功 + 空对象」——比失败更难查。
+    const core = createCore(createMockClient(), { version: 'test' });
+    const pet = peer('pet', [CAPABILITY.bubbleOpen], core);
+    pet.link.expose(
+      CAPABILITY.bubbleOpen,
+      () =>
+        new Promise<string>((resolve) =>
+          setTimeout(() => resolve('打开了'), 5),
+        ),
+    );
+    const cli = peer('cli', [], core);
+    await vi.waitFor(() => expect(cli.link.state()).toBe('ready'));
+    await expect(
+      cli.link.callCapability('pet', CAPABILITY.bubbleOpen),
+    ).resolves.toBe('打开了');
+  });
+
+  it('能力失败要回失败，不能当成成功', async () => {
+    const core = createCore(createMockClient(), { version: 'test' });
+    const pet = peer('pet', [CAPABILITY.windowShow], core);
+    pet.link.expose(CAPABILITY.windowShow, () =>
+      Promise.reject(new Error('窗口打不开')),
+    );
+    const cli = peer('cli', [], core);
+    await vi.waitFor(() => expect(cli.link.state()).toBe('ready'));
+    await expect(
+      cli.link.callCapability('pet', CAPABILITY.windowShow),
+    ).rejects.toThrow(/窗口打不开/);
+  });
+
+  it('目标没有声明这个能力时，由本体给出 NOT_FOUND 而不是窗口', async () => {
+    // 能力存不存在是本体该回答的问题：它在转发前就校验过目标的声明。
+    const core = createCore(createMockClient(), { version: 'test' });
+    const pet = peer('pet', [CAPABILITY.bubbleOpen], core);
+    pet.link.expose(CAPABILITY.bubbleOpen, () => '打开了');
+    const cli = peer('cli', [], core);
+    await vi.waitFor(() => expect(cli.link.state()).toBe('ready'));
+    await expect(
+      cli.link.callCapability('pet', CAPABILITY.windowHide),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
   it('本体告诉每个客户端谁在线、谁装了', async () => {

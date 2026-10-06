@@ -30,7 +30,7 @@ export function serveOnPipe(core: Core, path = PIPE_PATH) {
 
     const drop = () => {
       if (session) {
-        log(`客户端 ${session.info.kind} 断开`);
+        log(`参与者 ${session.info.provider} 断开`);
         core.disconnect(session.info.id);
       }
     };
@@ -67,9 +67,9 @@ export function serveOnPipe(core: Core, path = PIPE_PATH) {
             // 只有真正建立会话的那一次才算"接入"，否则日志会凭空多出几个宠物。
             if (parsed.t === 'hello' && fresh) {
               log(
-                `客户端 ${parsed.client.kind} 接入（${
-                  parsed.client.capabilities.join('、') || '无能力'
-                }）`,
+                `参与者 ${parsed.client.provider} 接入（角色 ${
+                  parsed.client.role
+                }，能力 ${parsed.client.capabilities.join('、') || '无'}）`,
               );
             }
             core.handleMessage(session, parsed);

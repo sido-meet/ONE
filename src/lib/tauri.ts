@@ -1,5 +1,6 @@
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import { CAPABILITY } from '../../packages/contracts/src/wire.ts';
 import type { ClientMessage } from '../../packages/contracts/src/wire.ts';
 import type { CoreChannel, CoreConnection } from './core-link';
 
@@ -14,8 +15,28 @@ import type { CoreChannel, CoreConnection } from './core-link';
 /** 壳在退出前请界面先停掉正在跑的 Run。 */
 export const BEFORE_QUIT = 'one:before-quit';
 
+/**
+ * 浏览器预览下各视图申报的能力。名字必须与 contracts 的 CAPABILITY 一致，
+ * 也必须与壳（Rust）声明的一致，否则别的参与者调用时会静默失败。
+ */
+const PET_CAPABILITIES = [
+  CAPABILITY.stateSummary,
+  CAPABILITY.bubbleOpen,
+  CAPABILITY.windowShow,
+  CAPABILITY.windowHide,
+];
+const DESKTOP_CAPABILITIES = [
+  CAPABILITY.stateSummary,
+  CAPABILITY.windowShow,
+  CAPABILITY.windowHide,
+  CAPABILITY.clientLaunch,
+];
+
 export interface ClientIdentity {
-  kind: string;
+  /** 呈现角色，纯标签（ADR-017）：pet / desktop。 */
+  role: string;
+  /** 寻址键，界面向本体要数据时用它被找到。 */
+  provider: string;
   label: string;
   window: string;
   capabilities: string[];
@@ -68,7 +89,8 @@ function toConnection(value: unknown): CoreConnection {
   const record = (value ?? {}) as Record<string, unknown>;
   return {
     connected: record.connected === true,
-    kind: typeof record.kind === 'string' ? record.kind : 'unknown',
+    role: typeof record.role === 'string' ? record.role : 'unknown',
+    provider: typeof record.provider === 'string' ? record.provider : 'unknown',
     label: typeof record.label === 'string' ? record.label : '未知客户端',
     capabilities: Array.isArray(record.capabilities)
       ? record.capabilities.filter(
@@ -128,27 +150,22 @@ export function tauriCoreChannel(): CoreChannel {
 export async function clientIdentity(): Promise<ClientIdentity> {
   if (!inTauri()) {
     // 浏览器预览没有壳：用查询串挑一个视图，并如实说明它不是真客户端。
-    const kind = new URLSearchParams(location.search).get('client');
-    const pet = kind === 'pet';
+    const requested = new URLSearchParams(location.search).get('client');
+    const pet = requested === 'pet';
     return {
-      kind: pet ? 'pet' : 'desktop',
+      role: pet ? 'pet' : 'desktop',
+      provider: pet ? 'pet' : 'desktop',
       label: pet ? 'ONE 宠物（浏览器预览）' : 'ONE 桌面端（浏览器预览）',
       window: pet ? 'pet' : 'main',
-      capabilities: pet
-        ? ['pet.state', 'pet.bubble.open', 'pet.show', 'pet.hide']
-        : [
-            'desktop.state',
-            'desktop.window.show',
-            'desktop.window.hide',
-            'desktop.launch.pet',
-          ],
+      capabilities: pet ? PET_CAPABILITIES : DESKTOP_CAPABILITIES,
       wireVersion: 0,
     };
   }
   const value = await invoke<unknown>('client_identity');
   const record = (value ?? {}) as Record<string, unknown>;
   return {
-    kind: typeof record.kind === 'string' ? record.kind : 'unknown',
+    role: typeof record.role === 'string' ? record.role : 'unknown',
+    provider: typeof record.provider === 'string' ? record.provider : 'unknown',
     label: typeof record.label === 'string' ? record.label : '未知客户端',
     window: typeof record.window === 'string' ? record.window : 'main',
     capabilities: Array.isArray(record.capabilities)

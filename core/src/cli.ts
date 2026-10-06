@@ -14,7 +14,8 @@ export async function runCli(argv: string[], pipe?: string) {
   let firstState: Extract<CoreMessage, { t: 'state' }> | undefined;
 
   const link = connectToCore({
-    kind: 'cli',
+    role: 'cli',
+    provider: 'cli',
     label: 'ONE 命令行',
     capabilities: [],
     version: WIRE_VERSION,
@@ -75,15 +76,17 @@ export async function runCli(argv: string[], pipe?: string) {
     const reply = await ask((id) => ({
       t: 'capability.call',
       id,
-      target: (argv[2] as 'pet' | 'desktop') ?? 'pet',
-      capability: second ?? '',
+      // `call <target> <capability>`，例如 `call pet bubble.open`。
+      // 能力名不再自带 "pet." 前缀，所以两个参数必须分开给。
+      target: second ?? 'pet',
+      capability: argv[2] ?? '',
     }));
     process.stdout.write(`${JSON.stringify(reply)}\n`);
   } else if (first === 'launch') {
     const reply = await ask((id) => ({
       t: 'clients.launch',
       id,
-      kind: (second as 'pet' | 'desktop') ?? 'pet',
+      provider: second ?? 'pet',
     }));
     process.stdout.write(`${JSON.stringify(reply)}\n`);
   } else {

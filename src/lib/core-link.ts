@@ -11,9 +11,9 @@ import type {
   Snapshot,
 } from '../../packages/contracts/src/index.ts';
 import type {
-  ClientKind,
   ClientMessage,
   CoreMessage,
+  ProviderId,
   RosterEntry,
 } from '../../packages/contracts/src/wire.ts';
 
@@ -30,7 +30,8 @@ export type CoreLinkState = 'connecting' | 'ready' | 'unavailable' | 'rejected';
 
 export interface CoreConnection {
   connected: boolean;
-  kind: string;
+  role: string;
+  provider: string;
   label: string;
   capabilities: string[];
   wireVersion: number;
@@ -38,7 +39,7 @@ export interface CoreConnection {
 }
 
 export interface Roster {
-  installed: ClientKind[];
+  installed: ProviderId[];
   connected: RosterEntry[];
 }
 
@@ -93,9 +94,9 @@ export interface CoreClient {
   /** 现在拿不到状态的原因：被拒绝，或者帧送不出去。界面要把它说出来。 */
   problem(): string;
   listClients(): Promise<Roster>;
-  launch(kind: ClientKind): Promise<unknown>;
+  launch(provider: ProviderId): Promise<unknown>;
   callCapability(
-    target: ClientKind,
+    target: ProviderId,
     capability: string,
     args?: unknown,
   ): Promise<unknown>;
@@ -178,10 +179,20 @@ export function createCoreClient(
   const call = <T>(cmd: string, args: unknown[]): Promise<T> =>
     request<T>({ t: 'call', id: crypto.randomUUID(), cmd, args });
 
+  /**
+   * 能力返回值可能是 Promise（多数要过壳的命令都是 async）。必须等它落地再回：
+   * 直接发 Promise 会被 JSON.stringify 变成 `{}`，调用方于是拿到一个空对象，
+   * 而能力其实成功了 —— 那种「成功但数据是假的」比失败更难查。
+   * Promise 拒绝一律回 ok=false，不把失败说成成功。
+   */
   const answer = (id: string, value: unknown) => {
-    void channel
-      .send({ t: 'capability.result', id, ok: true, value })
-      .catch(() => undefined);
+    void Promise.resolve(value)
+      .then((resolved) =>
+        channel.send({ t: 'capability.result', id, ok: true, value: resolved }),
+      )
+      .catch((cause: unknown) =>
+        refuse(id, cause instanceof Error ? cause.message : '本客户端处理失败'),
+      );
   };
 
   const refuse = (id: string, message: string) => {
@@ -204,7 +215,10 @@ export function createCoreClient(
         settle();
         return;
       case 'roster':
-        roster = { installed: message.installed, connected: message.clients };
+        roster = {
+          installed: message.installed,
+          connected: message.participants,
+        };
         settle();
         return;
       case 'result': {
@@ -223,12 +237,15 @@ export function createCoreClient(
         return;
       }
       case 'invoke': {
-        // 另一个客户端在调用本客户端：只回应自己声明过的能力。
+        // 另一个参与者在调用本客户端。同一客户端进程的多个窗口共用一根管道，
+        // 因此**每个窗口都会收到这一帧** —— 只有注册了该能力的那个窗口才回应。
+        //
+        // 没有 handler 时必须保持沉默：由这个窗口回「本客户端没有提供」会被
+        // 本体当成回执（本体只认第一个），于是对话条窗口会抢在宠物主窗口前面
+        // 把调用判死。能力是否存在是本体该回答的问题，它在转发前已经校验过
+        // 目标有没有声明这个能力。
         const handler = capabilities.get(message.capability);
-        if (!handler) {
-          refuse(message.id, `本客户端没有提供 ${message.capability}`);
-          return;
-        }
+        if (!handler) return;
         try {
           answer(message.id, handler(message.args));
         } catch (cause) {
@@ -378,9 +395,13 @@ export function createCoreClient(
     problem: () => refusal || failure,
     listClients: () =>
       request<Roster>({ t: 'clients.list', id: crypto.randomUUID() }),
-    launch: (kind: ClientKind) =>
-      request<unknown>({ t: 'clients.launch', id: crypto.randomUUID(), kind }),
-    callCapability: (target: ClientKind, capability: string, args?: unknown) =>
+    launch: (provider: ProviderId) =>
+      request<unknown>({
+        t: 'clients.launch',
+        id: crypto.randomUUID(),
+        provider,
+      }),
+    callCapability: (target: ProviderId, capability: string, args?: unknown) =>
       request<unknown>({
         t: 'capability.call',
         id: crypto.randomUUID(),

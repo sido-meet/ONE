@@ -34,7 +34,11 @@ flowchart TB
 
 ## 进程与部署决策（ADR-013 / 014 / 015）
 
-**已实现的形态**。本体持有唯一的会话运行时（ConversationRuntime）与领域端口、权威快照、客户端名册与安装清单。宠物、桌面端、命令行是对等的客户端：连上来、握手声明能力、收状态，彼此没有父子关系。`tauri.conf.json` 不再声明任何窗口，窗口在 `setup` 里按客户端种类创建，因此"默认安装的是宠物，桌面端可选"在架构上成立，而不是靠两个 exe 硬凑。
+**已实现的形态**。本体持有唯一的会话运行时（ConversationRuntime）与领域端口、权威快照、名册与安装清单。宠物、桌面端、命令行是对等的参与者：连上来、握手声明能力、收状态，彼此没有父子关系。`tauri.conf.json` 不再声明任何窗口，窗口在 `setup` 里按客户端种类创建，因此"默认安装的是宠物，桌面端可选"在架构上成立，而不是靠两个 exe 硬凑。
+
+**参与者有两个正交字段**（ADR-017）：`role` 是纯标签（`pet` / `desktop` / `cli` / `provider`），本体不为它写任何特判；`provider` 是唯一寻址键（`pet` / `local.calendar`），`capability.call.target` 靠它。旧的 `ClientKind` 枚举把三件事塞在一个字段里，于是任何日历提供方来握手都会被当非法帧拒掉 —— 协议层面不允许第三方存在。名册字段也从 `clients` 改为 `participants`，因为呈现形式与领域提供方都能查。
+
+**能力名只说做什么**：以前是 `pet.bubble.open`，认死了"宠物"；现在是 `bubble.open`，由谁提供交给 target 决定。因此宠物和桌面端**声明同名能力**（都有 `window.show`）却不冲突 —— 它们是两个不同的寻址键。名字的唯一真相源在 `wire.ts` 的 `CAPABILITY`，Rust 侧无法 import，改错一边会由 `main.rs` 的字面量测试变红。
 
 - **传输**：Windows 命名管道 + 版本化逐行 JSON，一帧一行，1MB 上限（`packages/contracts/src/wire.ts` 是协议唯一真相源，前后端与本体都从它生成/校验）。不占端口、不需要额外鉴权，同机其他程序也连不上。多客户端不能用 stdio（1 对 1），命名管道是既定选择。
 - **能力调用**：客户端之间不直接 spawn。需要请另一个客户端做事时，经本体转发（`capability.call` → `invoke` → `capability.result`），目标由能力名寻址。只有本体知道装了什么（`clients.list` 返回 `installed` 与 `connected`），所以"没装 / 没运行"都能给出明确错误而不是静默失败。0.1 用 `ONE_INSTALLED` 环境变量代替安装器。

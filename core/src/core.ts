@@ -2,13 +2,13 @@ import { ClientError } from '../../packages/contracts/src/index.ts';
 import type {
   AgentId,
   CalendarProvider,
-  ClientInfo,
-  ClientKind,
   ClientMessage,
   CommandContext,
   ConversationRuntime,
   CoreMessage,
   NotesProvider,
+  ParticipantInfo,
+  ProviderId,
   ProviderSlot,
   RosterEntry,
 } from '../../packages/contracts/src/index.ts';
@@ -48,18 +48,18 @@ export interface DomainPorts {
 
 export interface CoreOptions {
   version: string;
-  /** 已安装的客户端种类；默认只装宠物。 */
-  installed?: ClientKind[];
-  /** 客户端之间互调的等待上限。 */
+  /** 已安装的参与者寻址键；默认只装宠物。 */
+  installed?: ProviderId[];
+  /** 参与者之间互调的等待上限。 */
   capabilityTimeoutMs?: number;
   /** 由宿主注入的启动器；core 不认识任何具体可执行文件。 */
-  launchClient?: (kind: ClientKind) => Promise<void> | void;
+  launchClient?: (provider: ProviderId) => Promise<void> | void;
   /** 领域能力提供方；未给的种类一律按「没安装」处理。 */
   domains?: DomainPorts;
 }
 
 interface Session {
-  info: ClientInfo;
+  info: ParticipantInfo;
   connection: Connection;
   connectedAt: string;
   waiting: Map<
@@ -72,10 +72,14 @@ const CAPABILITY_TIMEOUT_MS = 5000;
 
 export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
   const sessions = new Map<string, Session>();
-  const installed = new Set<ClientKind>(options.installed ?? ['pet']);
+  const installed = new Set<ProviderId>(options.installed ?? ['pet']);
   const domains = options.domains ?? {};
   let revision = 0;
 
+  /**
+   * 名册是「参与者」而不是「客户端」：呈现形式与领域提供方都能查得到。
+   * 但界面不要把提供方画成宠物 —— 两者的图标与可用操作不同（ADR-017）。
+   */
   const roster = (): RosterEntry[] =>
     [...sessions.values()].map((session) => ({
       ...session.info,
@@ -92,7 +96,11 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
   };
 
   const pushRoster = () => {
-    broadcast({ t: 'roster', clients: roster(), installed: [...installed] });
+    broadcast({
+      t: 'roster',
+      participants: roster(),
+      installed: [...installed],
+    });
   };
 
   const contextOf = (args: unknown[]) => args[0] as CommandContext;
@@ -196,25 +204,25 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
     }
   };
 
-  /** 客户端之间的调用：core 只转发，结果由被调用的客户端自己给出。 */
+  /** 参与者之间的调用：core 只转发，结果由被调用方自己给出。 */
   const handleCapabilityCall = (
     requester: Session,
     id: string,
-    target: ClientKind,
+    target: ProviderId,
     capability: string,
     args: unknown,
   ) => {
     const respond = (message: CoreMessage) =>
       requester.connection.send(message);
     const found = [...sessions.values()].find(
-      (session) => session.info.kind === target,
+      (session) => session.info.provider === target,
     );
     if (!found) {
       respond({
         t: 'result',
         id,
         ok: false,
-        error: { code: 'NOT_FOUND', message: `${target} 客户端没有在运行` },
+        error: { code: 'NOT_FOUND', message: `${target} 没有在运行` },
       });
       return;
     }
@@ -257,21 +265,21 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
     found.connection.send({ t: 'invoke', id, capability, args });
   };
 
-  const handleLaunch = async (id: string, kind: ClientKind) => {
+  const handleLaunch = async (id: string, provider: ProviderId) => {
     const running = [...sessions.values()].some(
-      (session) => session.info.kind === kind,
+      (session) => session.info.provider === provider,
     );
     const respond = (message: CoreMessage) => broadcast(message);
     if (running) {
       respond({ t: 'result', id, ok: true, value: { alreadyRunning: true } });
       return;
     }
-    if (!installed.has(kind)) {
+    if (!installed.has(provider)) {
       respond({
         t: 'result',
         id,
         ok: false,
-        error: { code: 'NOT_FOUND', message: `${kind} 还没有安装` },
+        error: { code: 'NOT_FOUND', message: `${provider} 还没有安装` },
       });
       return;
     }
@@ -280,19 +288,19 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
         t: 'result',
         id,
         ok: false,
-        error: { code: 'UNAVAILABLE', message: '当前核心没有配置客户端启动器' },
+        error: { code: 'UNAVAILABLE', message: '当前核心没有配置启动器' },
       });
       return;
     }
     try {
-      await options.launchClient(kind);
-      respond({ t: 'result', id, ok: true, value: { launched: kind } });
+      await options.launchClient(provider);
+      respond({ t: 'result', id, ok: true, value: { launched: provider } });
     } catch (error) {
       respond({ t: 'result', id, ok: false, error: describe(error) });
     }
   };
 
-  /** 被调用的客户端回执，转交给最初发起调用的人。 */
+  /** 被调用的参与者回执，转交给最初发起调用的人。 */
   const handleCapabilityResult = (
     session: Session,
     id: string,
@@ -343,7 +351,7 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
         });
         return;
       case 'clients.launch':
-        void handleLaunch(message.id, message.kind);
+        void handleLaunch(message.id, message.provider);
         return;
       default:
         return;
@@ -371,7 +379,8 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
     const session: Session = {
       info: {
         id: crypto.randomUUID(),
-        kind: hello.client.kind,
+        role: hello.client.role,
+        provider: hello.client.provider,
         label: hello.client.label,
         capabilities: hello.client.capabilities,
       },
@@ -392,12 +401,12 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
     return session;
   };
 
-  /** A departing client must not leave other clients waiting on its answers. */
+  /** A departing participant must not leave others waiting on its answers. */
   const disconnect = (id: string) => {
     const session = sessions.get(id);
     if (!session) return;
     session.waiting.forEach((entry) =>
-      entry.reject(`${session.info.kind} 客户端已断开`),
+      entry.reject(`${session.info.provider} 已断开`),
     );
     sessions.delete(id);
     pushRoster();
@@ -412,8 +421,8 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
     unsubscribe,
     roster,
     installed: () => [...installed],
-    markInstalled(kind: ClientKind) {
-      installed.add(kind);
+    markInstalled(provider: ProviderId) {
+      installed.add(provider);
       pushRoster();
     },
     snapshot: () => ({ revision, snapshot: runtime.getSnapshot() }),

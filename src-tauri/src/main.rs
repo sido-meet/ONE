@@ -42,8 +42,8 @@ fn menu_action(id: &str) -> Option<MenuAction> {
         LAUNCH_DESKTOP => MenuAction::Launch("desktop"),
         LAUNCH_PET => MenuAction::Launch("pet"),
         RESTART_CORE => MenuAction::RestartCore,
-        PET_BUBBLE => MenuAction::PetCapability("pet.bubble.open"),
-        PET_SHOW => MenuAction::PetCapability("pet.show"),
+        PET_BUBBLE => MenuAction::PetCapability(CAP_BUBBLE_OPEN),
+        PET_SHOW => MenuAction::PetCapability(CAP_WINDOW_SHOW),
         QUIT => MenuAction::Quit,
         _ => return None,
     })
@@ -51,7 +51,16 @@ fn menu_action(id: &str) -> Option<MenuAction> {
 /// If the host window cannot answer, quitting must not hang the app.
 const QUIT_GRACE: Duration = Duration::from_millis(3000);
 /// Kept in sync with packages/contracts/src/wire.ts.
-const WIRE_VERSION: u32 = 1;
+const WIRE_VERSION: u32 = 2;
+
+/// 能力名只说做什么，不带实现前缀（ADR-017）。以前是 pet.bubble.open，换实现
+/// 就得改调用方；现在由寻址键决定谁提供，壳和界面共用同一份字符串，
+/// 由 `capability_names_match_the_contract` 测试守住一致性。
+const CAP_STATE_SUMMARY: &str = "state.summary";
+const CAP_BUBBLE_OPEN: &str = "bubble.open";
+const CAP_WINDOW_SHOW: &str = "window.show";
+const CAP_WINDOW_HIDE: &str = "window.hide";
+const CAP_CLIENT_LAUNCH: &str = "client.launch";
 
 /// A client is a presentation form, not a different program. The same binary
 /// starts as the pet (default) or as the desktop; core owns all the state.
@@ -97,14 +106,22 @@ impl ClientKindArg {
 
     /// What this client offers to the others through core. These names are the
     /// only contract between two clients; core matches them as plain strings.
+    ///
+    /// 宠物和桌面端共用同一批名字（都有 `window.show`）却不冲突，因为它们是
+    /// 两个不同的寻址键。名字里不出现"是谁提供的"，换实现不用改调用方。
     fn capabilities(self) -> &'static [&'static str] {
         match self {
-            Self::Pet => &["pet.state", "pet.bubble.open", "pet.show", "pet.hide"],
+            Self::Pet => &[
+                CAP_STATE_SUMMARY,
+                CAP_BUBBLE_OPEN,
+                CAP_WINDOW_SHOW,
+                CAP_WINDOW_HIDE,
+            ],
             Self::Desktop => &[
-                "desktop.state",
-                "desktop.window.show",
-                "desktop.window.hide",
-                "desktop.launch.pet",
+                CAP_STATE_SUMMARY,
+                CAP_WINDOW_SHOW,
+                CAP_WINDOW_HIDE,
+                CAP_CLIENT_LAUNCH,
             ],
         }
     }
@@ -351,7 +368,8 @@ fn client_identity(
     // 会被同进程的每个窗口各答一次，靠"谁先回"决定结果。
     let is_view = window.label() != client.primary_window;
     json!({
-        "kind": status.kind,
+        "role": status.role,
+        "provider": status.provider,
         "label": status.label,
         "capabilities": if is_view { Vec::new() } else { status.capabilities.clone() },
         "wireVersion": status.wire_version,
@@ -385,7 +403,8 @@ fn core_hello(link: State<'_, core_link::CoreLink>) -> Value {
         "t": "hello",
         "v": status.wire_version,
         "client": {
-            "kind": status.kind,
+            "role": status.role,
+            "provider": status.provider,
             "label": status.label,
             "capabilities": status.capabilities,
         },
@@ -547,9 +566,13 @@ fn call_pet_through_core(app: &AppHandle, capability: &str) {
 
 /// The window this client opens for itself. One client, one window; the pet
 /// is the only one that also owns the conversation strip.
+///
+/// `role` 是标签，`provider` 是寻址键（ADR-017）。目前两个呈现形式恰好同名，
+/// 但它们是两件事：领域提供方会是 role = "provider"、provider = "local.calendar"。
 #[derive(Clone, Copy)]
 struct ClientKind {
-    wire_name: &'static str,
+    role: &'static str,
+    provider: &'static str,
     label: &'static str,
     capabilities: &'static [&'static str],
     primary_window: &'static str,
@@ -558,7 +581,8 @@ struct ClientKind {
 impl ClientKind {
     fn of(client: ClientKindArg) -> Self {
         Self {
-            wire_name: client.wire_name(),
+            role: client.wire_name(),
+            provider: client.wire_name(),
             label: client.label(),
             capabilities: client.capabilities(),
             primary_window: client.primary_window(),
@@ -579,7 +603,8 @@ fn main() {
             // 会让界面拿到 "state not managed"，然后整页空白。
             core_link::start_bridge(
                 &handle,
-                identity.wire_name,
+                identity.role,
+                identity.provider,
                 identity.label,
                 identity.capabilities,
                 WIRE_VERSION,
@@ -718,13 +743,46 @@ mod tests {
     }
 
     #[test]
-    fn every_client_kind_declares_its_own_capabilities() {
-        // 能力名是客户端之间唯一的契约面，不能重名，也不能借用对方的。
+    fn capability_names_carry_no_implementation_prefix() {
+        // 能力名只说做什么，不说谁提供（ADR-017）：以前是 pet.bubble.open，
+        // 换个实现就得改调用方代码。现在由寻址键决定谁提供。
         let pet = ClientKindArg::Pet.capabilities();
         let desktop = ClientKindArg::Desktop.capabilities();
-        assert!(pet.iter().all(|item| item.starts_with("pet.")));
-        assert!(desktop.iter().all(|item| item.starts_with("desktop.")));
-        assert!(!pet.iter().any(|item| desktop.contains(item)));
+        for name in pet.iter().chain(desktop.iter()) {
+            assert!(
+                !name.starts_with("pet.") && !name.starts_with("desktop."),
+                "{name} 仍带着实现前缀"
+            );
+            assert!(name.contains('.'), "{name} 应当形如 `bubble.open`");
+        }
+
+        // 同一个客户端内部不能重名：本体按字符串匹配，重名会歧义。
+        for list in [pet, desktop] {
+            let mut sorted = list.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(sorted.len(), list.len(), "同一客户端重复声明了能力");
+        }
+
+        // 宠物和桌面端声明同名能力是正常的 —— 它们是两个不同的寻址键。
+        let shared: Vec<&&str> = pet.iter().filter(|n| desktop.contains(n)).collect();
+        assert_eq!(shared.len(), 3, "预期共有三个同名能力");
+
+        // 字面量写死在这里：Rust 无法 import TS，改错一边就会红。
+        // 必须与 packages/contracts/src/wire.ts 的 CAPABILITY 完全一致。
+        assert_eq!(
+            pet,
+            &["state.summary", "bubble.open", "window.show", "window.hide"]
+        );
+        assert_eq!(
+            desktop,
+            &[
+                "state.summary",
+                "window.show",
+                "window.hide",
+                "client.launch"
+            ]
+        );
     }
 
     #[test]

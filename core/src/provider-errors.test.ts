@@ -181,7 +181,12 @@ describe('core dispatching domain commands', () => {
       {
         t: 'hello',
         v: WIRE_VERSION,
-        client: { kind: 'pet', label: 'pet', capabilities: [] },
+        client: {
+          role: 'pet',
+          provider: 'pet',
+          label: 'pet',
+          capabilities: [],
+        },
       },
     );
     if (!session) throw new Error('handshake refused');

@@ -1,28 +1,58 @@
 import type { ErrorCode, Snapshot } from './index.ts';
 
 /**
- * Wire protocol between ONE core and any client (docs/03, ADR-013).
+ * Wire protocol between ONE core and any participant (docs/03, ADR-013/017).
  *
- * ONE 本体是唯一的状态与能力来源；客户端只是呈现形式，可以是宠物、桌面端
- * 或命令行。core 同时充当客户端之间的调用中介：每个客户端在 hello 里申报
- * 自己的能力，任何客户端都能通过 core 调用另一个客户端的能力。
+ * ONE 本体是唯一的状态与能力来源；参与者只是呈现形式或领域提供方，可以是宠物、
+ * 桌面端、命令行，也可以是日历、笔记这类提供方。core 同时充当参与者之间的调用
+ * 中介：每个参与者在 hello 里申报自己的能力，任何参与者都能通过 core 调用另一个
+ * 参与者的能力。
  *
  * 传输是有长度边界的逐行 JSON（Windows 命名管道），协议版本不兼容即拒绝。
  */
-export const WIRE_VERSION = 1;
+export const WIRE_VERSION = 2;
 
-/** 客户端种类只是标签，core 不为它们写任何特判。 */
-export type ClientKind = 'pet' | 'desktop' | 'cli';
+/**
+ * 呈现角色，纯标签，core 不为它写任何特判：客户端报 pet / desktop / cli，领域
+ * 提供方报 provider。刻意不穷举 —— 每加一种角色就改协议，等于把注册表写成硬编码。
+ */
+export type ParticipantRole = string;
 
-export interface ClientInfo {
+/**
+ * 唯一寻址键。客户端与提供方共用一个命名空间：pet、desktop、local.calendar。
+ * `capability.call.target` 靠它寻址，因此它必须全局唯一。
+ */
+export type ProviderId = string;
+
+/**
+ * 能力名只说做什么，不带实现前缀（ADR-017）。以前叫 `pet.bubble.open`，换实现
+ * 就要改调用方代码；现在叫 `bubble.open`，由谁提供交给 target 决定。
+ *
+ * 前后端各有一份字符串，所以这里给出唯一真相源：Rust 侧无法 import，改为由测试
+ * 保证一致（见 src-tauri/src/main.rs 的能力声明测试）。
+ */
+export const CAPABILITY = {
+  /** 参与者自报当前状态摘要。 */
+  stateSummary: 'state.summary',
+  /** 呼出对话条。 */
+  bubbleOpen: 'bubble.open',
+  /** 显示 / 隐藏参与者自己的主窗口。 */
+  windowShow: 'window.show',
+  windowHide: 'window.hide',
+  /** 拉起另一个已安装的参与者，参数为 { provider }。 */
+  clientLaunch: 'client.launch',
+} as const;
+
+export interface ParticipantInfo {
   id: string;
-  kind: ClientKind;
+  role: ParticipantRole;
+  provider: ProviderId;
   label: string;
-  /** 形如 `pet.bubble.open`，调用方按字符串寻址。 */
+  /** 形如 `bubble.open`、`calendar.create`，按字符串寻址。 */
   capabilities: string[];
 }
 
-export interface RosterEntry extends ClientInfo {
+export interface RosterEntry extends ParticipantInfo {
   connectedAt: string;
 }
 
@@ -31,15 +61,20 @@ export type ClientMessage =
   | {
       t: 'hello';
       v: number;
-      client: { kind: ClientKind; label: string; capabilities: string[] };
+      client: {
+        role: ParticipantRole;
+        provider: ProviderId;
+        label: string;
+        capabilities: string[];
+      };
     }
   | { t: 'call'; id: string; cmd: string; args: unknown[] }
   | { t: 'clients.list'; id: string }
-  | { t: 'clients.launch'; id: string; kind: ClientKind }
+  | { t: 'clients.launch'; id: string; provider: ProviderId }
   | {
       t: 'capability.call';
       id: string;
-      target: ClientKind;
+      target: ProviderId;
       capability: string;
       args?: unknown;
     }
@@ -67,16 +102,31 @@ export type CoreMessage =
         details?: Record<string, unknown>;
       };
     }
-  | { t: 'roster'; clients: RosterEntry[]; installed: ClientKind[] }
+  | { t: 'roster'; participants: RosterEntry[]; installed: ProviderId[] }
   | { t: 'invoke'; id: string; capability: string; args?: unknown }
   | { t: 'rejected'; message: string }
   | { t: 'pong' };
 
-const CLIENT_KINDS: ClientKind[] = ['pet', 'desktop', 'cli'];
+/**
+ * 寻址键的形状：小写字母开头，点或连字符分段，如 pet、local.calendar。
+ * 刻意不放行空格、大写与斜杠 —— 它们会出现在日志和 URL 里，是命令注入的入口。
+ */
+const PROVIDER_ID = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/;
+const ROLE = /^[a-z][a-z0-9-]*$/;
+const MAX_PROVIDER_ID = 128;
+const MAX_ROLE = 32;
 
-export function isClientKind(value: unknown): value is ClientKind {
+export function isProviderId(value: unknown): value is ProviderId {
   return (
-    typeof value === 'string' && (CLIENT_KINDS as string[]).includes(value)
+    typeof value === 'string' &&
+    value.length <= MAX_PROVIDER_ID &&
+    PROVIDER_ID.test(value)
+  );
+}
+
+export function isParticipantRole(value: unknown): value is ParticipantRole {
+  return (
+    typeof value === 'string' && value.length <= MAX_ROLE && ROLE.test(value)
   );
 }
 
@@ -90,7 +140,8 @@ export function parseClientMessage(value: unknown): ClientMessage | null {
     case 'hello': {
       if (typeof value.v !== 'number') return null;
       const client = isRecord(value.client) ? value.client : null;
-      if (!client || !isClientKind(client.kind)) return null;
+      if (!client || !isParticipantRole(client.role)) return null;
+      if (!isProviderId(client.provider)) return null;
       if (typeof client.label !== 'string') return null;
       const capabilities = Array.isArray(client.capabilities)
         ? client.capabilities.filter(
@@ -101,7 +152,8 @@ export function parseClientMessage(value: unknown): ClientMessage | null {
         t: 'hello',
         v: value.v,
         client: {
-          kind: client.kind,
+          role: client.role,
+          provider: client.provider,
           label: client.label.slice(0, 64),
           capabilities: capabilities.slice(0, 32),
         },
@@ -117,11 +169,11 @@ export function parseClientMessage(value: unknown): ClientMessage | null {
       return { t: 'clients.list', id: value.id };
     case 'clients.launch':
       if (typeof value.id !== 'string' || !value.id) return null;
-      if (!isClientKind(value.kind)) return null;
-      return { t: 'clients.launch', id: value.id, kind: value.kind };
+      if (!isProviderId(value.provider)) return null;
+      return { t: 'clients.launch', id: value.id, provider: value.provider };
     case 'capability.call':
       if (typeof value.id !== 'string' || !value.id) return null;
-      if (!isClientKind(value.target)) return null;
+      if (!isProviderId(value.target)) return null;
       if (typeof value.capability !== 'string' || !value.capability)
         return null;
       return {
@@ -162,7 +214,8 @@ const isRosterEntry = (value: unknown): value is RosterEntry => {
   if (!isRecord(value)) return false;
   return (
     typeof value.id === 'string' &&
-    isClientKind(value.kind) &&
+    isParticipantRole(value.role) &&
+    isProviderId(value.provider) &&
     typeof value.label === 'string' &&
     typeof value.connectedAt === 'string' &&
     Array.isArray(value.capabilities)
@@ -220,12 +273,12 @@ export function parseCoreMessage(value: unknown): CoreMessage | null {
       };
     }
     case 'roster':
-      if (!Array.isArray(value.clients) || !Array.isArray(value.installed))
+      if (!Array.isArray(value.participants) || !Array.isArray(value.installed))
         return null;
       return {
         t: 'roster',
-        clients: value.clients.filter(isRosterEntry),
-        installed: value.installed.filter(isClientKind),
+        participants: value.participants.filter(isRosterEntry),
+        installed: value.installed.filter(isProviderId),
       };
     case 'invoke':
       if (typeof value.id !== 'string' || !value.id) return null;

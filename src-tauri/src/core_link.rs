@@ -32,11 +32,15 @@ const CORE_ENTRY: &str = "core/src/index.ts";
 
 /// What this process is, and whether ONE 本体 answered. The renderer asks for
 /// this instead of guessing from the URL: both clients load the same page.
+///
+/// `role` is a label the core never special-cases; `provider` is the addressing
+/// key other participants use to reach us (ADR-017).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoreStatus {
     pub connected: bool,
-    pub kind: String,
+    pub role: String,
+    pub provider: String,
     pub label: String,
     pub capabilities: Vec<String>,
     pub wire_version: u32,
@@ -44,7 +48,8 @@ pub struct CoreStatus {
 }
 
 pub struct CoreLink {
-    kind: String,
+    role: String,
+    provider: String,
     label: String,
     capabilities: Vec<String>,
     wire_version: u32,
@@ -61,7 +66,8 @@ impl CoreLink {
     pub fn status(&self) -> CoreStatus {
         CoreStatus {
             connected: *self.connected.lock().unwrap(),
-            kind: self.kind.clone(),
+            role: self.role.clone(),
+            provider: self.provider.clone(),
             label: self.label.clone(),
             capabilities: self.capabilities.clone(),
             wire_version: self.wire_version,
@@ -335,13 +341,15 @@ fn spawn_pipe_reader(app: AppHandle) {
 
 pub fn start_bridge(
     app: &AppHandle,
-    kind: &str,
+    role: &str,
+    provider: &str,
     label: &str,
     capabilities: &[&str],
     wire_version: u32,
 ) {
     app.manage(CoreLink {
-        kind: kind.to_string(),
+        role: role.to_string(),
+        provider: provider.to_string(),
         label: label.to_string(),
         capabilities: capabilities.iter().map(|item| item.to_string()).collect(),
         wire_version,

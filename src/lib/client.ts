@@ -14,7 +14,8 @@ import {
 } from './tauri';
 import type { ClientIdentity } from './tauri';
 import { createMemoryCoreChannel } from './transport';
-import { WIRE_VERSION } from '../../packages/contracts/src/wire';
+import { CAPABILITY, WIRE_VERSION } from '../../packages/contracts/src/wire';
+import type { ClientMessage } from '../../packages/contracts/src/wire';
 
 /**
  * 唯一的装配点（ADR-013）。
@@ -84,7 +85,7 @@ function placeholderLink(): CoreClient {
   };
 }
 
-/** 这个客户端能被别的客户端调用的东西。名字必须和壳里声明的完全一致。 */
+/** 这个客户端能被别的参与者调用的东西。名字必须和壳里声明的完全一致。 */
 function capabilityHandlers(
   self: ClientIdentity,
 ): Record<string, CapabilityHandler> {
@@ -96,6 +97,11 @@ function capabilityHandlers(
   );
 }
 
+/**
+ * 能力名只说做什么，不带实现前缀（ADR-017）：以前叫 `pet.bubble.open`，
+ * 换实现就得改调用方。现在同一个名字由不同参与者各自实现 —— 宠物和桌面端
+ * 都有 `window.show`，但它们是两个不同的寻址键，不冲突。
+ */
 function allCapabilityHandlers(
   self: ClientIdentity,
 ): Record<string, CapabilityHandler> {
@@ -103,32 +109,32 @@ function allCapabilityHandlers(
     const snapshot = link.snapshot();
     return {
       window: self.window,
-      kind: self.kind,
+      provider: self.provider,
       conversations: snapshot.conversations.length,
       runningRuns: snapshot.runs.filter((run) => run.status === 'running')
         .length,
       coreVersion: link.connection()?.coreVersion ?? null,
     };
   };
-  if (self.kind === 'pet') {
+  if (self.role === 'pet') {
     return {
-      'pet.state': summary,
-      'pet.bubble.open': () => shell.openBubble(),
-      'pet.show': () => shell.showPet(),
-      'pet.hide': () => shell.hidePet(),
+      [CAPABILITY.stateSummary]: summary,
+      [CAPABILITY.bubbleOpen]: () => shell.openBubble(),
+      [CAPABILITY.windowShow]: () => shell.showPet(),
+      [CAPABILITY.windowHide]: () => shell.hidePet(),
     };
   }
   return {
-    'desktop.state': summary,
-    'desktop.window.show': () => shell.openMain(),
-    'desktop.window.hide': () => shell.hideMain(),
-    'desktop.launch.pet': async () => {
+    [CAPABILITY.stateSummary]: summary,
+    [CAPABILITY.windowShow]: () => shell.openMain(),
+    [CAPABILITY.windowHide]: () => shell.hideMain(),
+    [CAPABILITY.clientLaunch]: async () => {
       const { askClient, launchClient } = await import('./proxy-client');
       const running = link
         .roster()
-        .connected.some((client) => client.kind === 'pet');
+        .connected.some((entry) => entry.provider === 'pet');
       return running
-        ? askClient(link, 'pet', 'pet.show')
+        ? askClient(link, 'pet', CAPABILITY.windowShow)
         : launchClient(link, 'pet');
     },
   };
@@ -142,17 +148,10 @@ function channelFor(self: ClientIdentity): CoreChannel {
       version: '浏览器预览',
       installed: ['pet', 'desktop'],
     }),
-    hello: {
-      t: 'hello',
-      v: WIRE_VERSION,
-      client: {
-        kind: self.kind === 'pet' ? 'pet' : 'desktop',
-        label: self.label,
-        capabilities: self.capabilities,
-      },
-    },
+    hello: helloFor(self),
     connection: {
-      kind: self.kind,
+      role: self.role,
+      provider: self.provider,
       label: self.label,
       capabilities: self.capabilities,
       wireVersion: WIRE_VERSION,
@@ -161,18 +160,21 @@ function channelFor(self: ClientIdentity): CoreChannel {
   });
 }
 
+const helloFor = (self: ClientIdentity): ClientMessage => ({
+  t: 'hello',
+  v: WIRE_VERSION,
+  client: {
+    role: self.role,
+    provider: self.provider,
+    label: self.label,
+    capabilities: self.capabilities,
+  },
+});
+
 /** Views must never mount before this resolves: `link` is the only state path. */
 export async function startClient(): Promise<ClientIdentity> {
   const self = await clientIdentity();
-  const started = createCoreClient(channelFor(self), {
-    t: 'hello',
-    v: WIRE_VERSION,
-    client: {
-      kind: self.kind === 'pet' ? 'pet' : 'desktop',
-      label: self.label,
-      capabilities: self.capabilities,
-    },
-  });
+  const started = createCoreClient(channelFor(self), helloFor(self));
   identity = self;
   link = started;
   client = started.client;

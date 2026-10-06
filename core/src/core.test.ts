@@ -9,7 +9,7 @@ import { createCore } from './core.ts';
 import type { Core } from './core.ts';
 import { WIRE_VERSION } from '../../packages/contracts/src/wire.ts';
 
-/** 一个客户端的收发端，带上它收到的所有消息。 */
+/** 一个参与者的收发端，带上它收到的所有消息。 */
 function fakeClient() {
   const received: CoreMessage[] = [];
   const sent: string[] = [];
@@ -25,13 +25,15 @@ function fakeClient() {
   return { connection, received, sent, raw: (index: number) => sent[index] };
 }
 
+/** role 是标签，provider 是寻址键；两者分开才认得出"谁提供"和"是什么"。 */
 const hello = (
-  kind: 'pet' | 'desktop' | 'cli',
+  provider: string,
   capabilities: string[] = [],
+  role = provider,
 ): ClientMessage => ({
   t: 'hello',
   v: WIRE_VERSION,
-  client: { kind, label: kind, capabilities },
+  client: { role, provider, label: provider, capabilities },
 });
 
 const lastResult = (client: ReturnType<typeof fakeClient>) => {
@@ -64,7 +66,9 @@ describe('ONE core', () => {
     expect(pet.received[1]).toMatchObject({ t: 'state' });
     const roster = pet.received[2];
     expect(roster?.t === 'roster' && roster.installed).toEqual(['pet']);
-    expect(roster?.t === 'roster' && roster.clients[0]?.kind).toBe('pet');
+    expect(roster?.t === 'roster' && roster.participants[0]?.provider).toBe(
+      'pet',
+    );
   });
 
   it('refuses a first frame that is not hello, and a wrong version', () => {
@@ -219,7 +223,7 @@ describe('ONE core', () => {
       ok: false,
       error: { code: 'INTERNAL' },
     });
-    expect(core.roster().map((item) => item.kind)).toEqual(['desktop']);
+    expect(core.roster().map((item) => item.provider)).toEqual(['desktop']);
   });
 
   it('only launches clients that are actually installed', async () => {
@@ -231,7 +235,7 @@ describe('ONE core', () => {
     core.handleMessage(session, {
       t: 'clients.launch',
       id: 'l1',
-      kind: 'desktop',
+      provider: 'desktop',
     });
     await Promise.resolve();
     expect(lastResult(cli)).toMatchObject({
@@ -254,7 +258,7 @@ describe('ONE core', () => {
     coreWithLauncher.handleMessage(freshSession, {
       t: 'clients.launch',
       id: 'l2',
-      kind: 'desktop',
+      provider: 'desktop',
     });
     await Promise.resolve();
     await Promise.resolve();
