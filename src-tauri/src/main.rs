@@ -130,7 +130,18 @@ fn open_main(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn open_bubble(app: AppHandle) -> Result<(), String> {
-    show_bubble(&app)
+    show_bubble(&app).inspect_err(|error| eprintln!("one: open_bubble failed: {error}"))
+}
+
+#[tauri::command]
+fn hide_bubble(app: AppHandle) -> Result<(), String> {
+    app.get_webview_window(BUBBLE)
+        .ok_or("bubble window is missing")?
+        .hide()
+        .map_err(|error| {
+            eprintln!("one: hide_bubble failed: {error}");
+            error.to_string()
+        })
 }
 
 /// Lets the frontend catch a renamed or missing command instead of silently
@@ -150,14 +161,6 @@ fn shell_commands() -> Vec<&'static str> {
         "force_quit",
         "shell_commands",
     ]
-}
-
-#[tauri::command]
-fn hide_bubble(app: AppHandle) -> Result<(), String> {
-    app.get_webview_window(BUBBLE)
-        .ok_or("bubble window is missing")?
-        .hide()
-        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -318,24 +321,24 @@ mod tests {
     fn opens_under_the_pet() {
         let (x, y) = place_bubble(
             Rect { x: 1000, y: 100, width: 128, height: 128 },
-            Rect { x: 0, y: 0, width: 400, height: 560 },
+            Rect { x: 0, y: 0, width: 380, height: 168 },
             Rect { x: 0, y: 0, width: 1920, height: 1040 },
             12,
         );
-        assert_eq!(x, 864);
+        assert_eq!(x, 874);
         assert_eq!(y, 240);
     }
 
     #[test]
     fn flips_above_when_the_bottom_edge_would_leave_the_work_area() {
         let (x, y) = place_bubble(
-            Rect { x: 900, y: 700, width: 128, height: 128 },
-            Rect { x: 0, y: 0, width: 400, height: 560 },
+            Rect { x: 900, y: 900, width: 128, height: 128 },
+            Rect { x: 0, y: 0, width: 380, height: 168 },
             Rect { x: 0, y: 0, width: 1920, height: 1040 },
             12,
         );
-        assert_eq!(x, 764);
-        assert_eq!(y, 128);
+        assert_eq!(x, 774);
+        assert_eq!(y, 720);
     }
 
     #[test]
@@ -343,12 +346,12 @@ mod tests {
         let work = Rect { x: 1920, y: -200, width: 1280, height: 1000 };
         let (x, y) = place_bubble(
             Rect { x: 3100, y: 700, width: 128, height: 128 },
-            Rect { x: 0, y: 0, width: 400, height: 560 },
+            Rect { x: 0, y: 0, width: 380, height: 168 },
             work,
             12,
         );
-        assert!(x >= work.x && x + 400 <= work.x + work.width);
-        assert!(y >= work.y && y + 560 <= work.y + work.height);
+        assert!(x >= work.x && x + 380 <= work.x + work.width);
+        assert!(y >= work.y && y + 168 <= work.y + work.height);
     }
 
     #[test]
@@ -369,25 +372,25 @@ mod tests {
             Rect {
                 x: 0,
                 y: 0,
-                width: 400,
-                height: 560,
-            },
+                width: 380,
+                height: 168,
+                },
             work,
             12,
         );
         // The bubble would hang off the right edge, so it is pulled back inside.
-        assert_eq!(x, 880);
-        assert_eq!(y, 28);
+        assert_eq!(x, 900);
+        assert_eq!(y, 420);
     }
 
     #[test]
     fn survives_a_work_area_smaller_than_the_bubble() {
         let (x, y) = place_bubble(
             Rect { x: 10, y: 10, width: 128, height: 128 },
-            Rect { x: 0, y: 0, width: 400, height: 560 },
-            Rect { x: 0, y: 0, width: 320, height: 480 },
+            Rect { x: 0, y: 0, width: 380, height: 168 },
+            Rect { x: 0, y: 0, width: 320, height: 200 },
             12,
         );
-        assert_eq!((x, y), (0, 0));
+        assert_eq!((x, y), (0, 32));
     }
 }
