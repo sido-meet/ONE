@@ -1,3 +1,15 @@
+import type {
+  CalendarEvent,
+  CalendarPage,
+  CommandContext,
+  DeleteResult,
+  Note,
+  NotePage,
+} from './domain';
+
+export * from './errors';
+export * from './domain';
+
 /** ONE-owned identities; external agent sessions are never conversation IDs. */
 export type AgentId = 'chat' | 'claude-code' | 'mcode';
 export type RunStatus = 'running' | 'completed' | 'cancelled' | 'failed';
@@ -56,8 +68,15 @@ export interface Snapshot {
   events: DurableEvent[];
   runs: Run[];
   drafts: Record<string, string>;
+  notes: Note[];
+  calendarEvents: CalendarEvent[];
 }
-/** The first vertical slice. Calendar/Notes contracts are planned in docs/04. */
+
+/**
+ * The first vertical slice plus the Calendar/Notes domain commands. Command input
+ * stays `unknown` on purpose: TypeScript cannot guard an IPC or MCP boundary, so
+ * every implementation validates before touching state.
+ */
 export interface OneClient {
   getSnapshot(): Snapshot;
   subscribe(listener: () => void): () => void;
@@ -65,15 +84,22 @@ export interface OneClient {
   changeAgent(conversationId: string, agentId: AgentId): Promise<void>;
   sendMessage(conversationId: string, text: string): Promise<Run>;
   cancelRun(runId: string): Promise<void>;
+  calendarList(context: CommandContext, input: unknown): Promise<CalendarPage>;
+  calendarCreate(
+    context: CommandContext,
+    input: unknown,
+  ): Promise<CalendarEvent>;
+  calendarUpdate(
+    context: CommandContext,
+    input: unknown,
+  ): Promise<CalendarEvent>;
+  calendarDelete(
+    context: CommandContext,
+    input: unknown,
+  ): Promise<DeleteResult>;
+  notesList(context: CommandContext, input: unknown): Promise<NotePage>;
+  notesCreate(context: CommandContext, input: unknown): Promise<Note>;
+  notesUpdate(context: CommandContext, input: unknown): Promise<Note>;
+  notesDelete(context: CommandContext, input: unknown): Promise<DeleteResult>;
   dispose(): void;
-}
-export type ErrorCode = 'NOT_FOUND' | 'BUSY' | 'VALIDATION' | 'DISPOSED';
-export class ClientError extends Error {
-  constructor(
-    public readonly code: ErrorCode,
-    message: string,
-  ) {
-    super(message);
-    this.name = 'ClientError';
-  }
 }

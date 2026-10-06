@@ -1,4 +1,5 @@
 import { ClientError } from '../../contracts/src';
+import { createDomainCommands, createDomainState } from './domain';
 import type {
   AgentId,
   Conversation,
@@ -21,7 +22,8 @@ type EventInput =
   | { type: 'run.finished'; run: Run };
 
 export function createMockClient(options: { tickMs?: number } = {}): OneClient {
-  const state: Snapshot = {
+  const domain = createDomainState();
+  const state: Omit<Snapshot, 'notes' | 'calendarEvents'> = {
     workspaces: [{ id: 'personal', name: '个人空间' }],
     conversations: [
       {
@@ -81,8 +83,15 @@ export function createMockClient(options: { tickMs?: number } = {}): OneClient {
     append(run.conversationId, { type: 'run.finished', run });
     notify();
   };
+  const commands = createDomainCommands(domain, { notify, assertOpen });
   return {
-    getSnapshot: () => structuredClone(state),
+    ...commands,
+    getSnapshot: () =>
+      structuredClone({
+        ...state,
+        notes: domain.notes,
+        calendarEvents: domain.calendarEvents,
+      }),
     subscribe(listener) {
       assertOpen();
       listeners.add(listener);
