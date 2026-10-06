@@ -30,29 +30,30 @@ fn clamp(value: i32, min: i32, max: i32) -> i32 {
     value.max(min).min(max)
 }
 
-/// Puts the bubble next to the pet: above by default, below when there is no
-/// room, and always inside the monitor work area so it never lands off-screen
-/// at high DPI, on a second display, or on negative coordinates.
+/// Puts the bubble under the pet, flipping above when the bottom edge would
+/// leave the monitor work area, and always keeps it inside that work area so it
+/// never lands off-screen at high DPI, on a second display, or on negative
+/// coordinates.
 fn place_bubble(pet: Rect, bubble: Rect, work: Rect, gap: i32) -> (i32, i32) {
     let x = clamp(
         pet.x + pet.width / 2 - bubble.width / 2,
         work.x,
         work.x + work.width - bubble.width,
     );
-    let above = pet.y - bubble.height - gap;
     let below = pet.y + pet.height + gap;
+    let above = pet.y - bubble.height - gap;
     let bottom_limit = work.y + work.height - bubble.height;
-    let y = if above >= work.y {
-        above
-    } else if below <= bottom_limit {
+    let y = if below <= bottom_limit {
         below
+    } else if above >= work.y {
+        above
     } else {
         clamp(below, work.y, bottom_limit)
     };
     (x, y)
 }
 
-fn open_bubble(app: &AppHandle) -> Result<(), String> {
+fn show_bubble(app: &AppHandle) -> Result<(), String> {
     let bubble = app
         .get_webview_window(BUBBLE)
         .ok_or("bubble window is missing")?;
@@ -128,8 +129,27 @@ fn open_main(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn open_bubble_window(app: AppHandle) -> Result<(), String> {
-    open_bubble(&app)
+fn open_bubble(app: AppHandle) -> Result<(), String> {
+    show_bubble(&app)
+}
+
+/// Lets the frontend catch a renamed or missing command instead of silently
+/// doing nothing: every invoke that fails is otherwise invisible to the user.
+#[tauri::command]
+fn shell_commands() -> Vec<&'static str> {
+    vec![
+        "open_main",
+        "open_bubble",
+        "hide_bubble",
+        "hide_pet",
+        "show_pet",
+        "popup_pet_menu",
+        "start_drag",
+        "move_window",
+        "quit_app",
+        "force_quit",
+        "shell_commands",
+    ]
 }
 
 #[tauri::command]
@@ -157,8 +177,30 @@ fn show_pet(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn start_drag(window: WebviewWindow) -> Result<(), String> {
-    window.start_dragging().map_err(|error| error.to_string())
+fn start_drag(app: AppHandle, window: WebviewWindow) {
+    // Window dragging must happen on the thread that owns the window; a command
+    // body runs on the async runtime, so hand the drag over to the main thread.
+    let handle = window.clone();
+    if let Err(error) = app.run_on_main_thread(move || {
+        if let Err(error) = handle.start_dragging() {
+            eprintln!("one: start_dragging failed: {error}");
+        }
+    }) {
+        eprintln!("one: could not schedule start_dragging: {error}");
+    }
+}
+
+/// Keyboard equivalent of dragging, in logical pixels so the shell converts them.
+#[tauri::command]
+fn move_window(window: WebviewWindow, dx: f64, dy: f64) -> Result<(), String> {
+    let position = window.outer_position().map_err(|error| error.to_string())?;
+    let scale = window.scale_factor().unwrap_or(1.0);
+    window
+        .set_position(PhysicalPosition::new(
+            position.x + (dx * scale).round() as i32,
+            position.y + (dy * scale).round() as i32,
+        ))
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -229,7 +271,7 @@ fn main() {
                     let _ = open_main(app.clone());
                 }
                 "open_bubble" => {
-                    let _ = open_bubble(app);
+                    let _ = show_bubble(app);
                 }
                 "hide_pet" => {
                     let _ = hide_pet(app.clone());
@@ -243,14 +285,16 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             open_main,
-            open_bubble_window,
+            open_bubble,
             hide_bubble,
             hide_pet,
             show_pet,
             start_drag,
+            move_window,
             popup_pet_menu,
             quit_app,
-            force_quit
+            force_quit,
+            shell_commands
         ])
         .on_window_event(|window, event| {
             // Closing the host window ends the session: the pet and bubble have
@@ -271,27 +315,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prefers_the_space_above_the_pet() {
+    fn opens_under_the_pet() {
         let (x, y) = place_bubble(
-            Rect { x: 1000, y: 700, width: 128, height: 128 },
+            Rect { x: 1000, y: 100, width: 128, height: 128 },
             Rect { x: 0, y: 0, width: 400, height: 560 },
             Rect { x: 0, y: 0, width: 1920, height: 1040 },
             12,
         );
         assert_eq!(x, 864);
-        assert_eq!(y, 128);
+        assert_eq!(y, 240);
     }
 
     #[test]
-    fn flips_below_when_the_top_edge_would_leave_the_work_area() {
+    fn flips_above_when_the_bottom_edge_would_leave_the_work_area() {
         let (x, y) = place_bubble(
-            Rect { x: 900, y: 120, width: 128, height: 128 },
+            Rect { x: 900, y: 700, width: 128, height: 128 },
             Rect { x: 0, y: 0, width: 400, height: 560 },
             Rect { x: 0, y: 0, width: 1920, height: 1040 },
             12,
         );
         assert_eq!(x, 764);
-        assert_eq!(y, 260);
+        assert_eq!(y, 128);
     }
 
     #[test]

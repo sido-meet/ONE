@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { AgentId } from '../../packages/contracts/src';
+  import type { AgentId, Message } from '../../packages/contracts/src';
   import { client, serviceState } from '../lib/client';
   import { pickActiveConversationId } from '../lib/active';
   import { shell } from '../lib/tauri';
@@ -30,6 +30,20 @@
   const agentName = (id: AgentId) =>
     agents.find((agent) => agent.id === id)?.name ?? id;
 
+  /** The work panel owns the live reply, so history only shows finished turns. */
+  const liveText = $derived(
+    activeRun ? snapshot.drafts[activeRun.id] || '正在准备回复…' : '',
+  );
+  const lastReply = $derived.by((): Message | undefined => {
+    for (const event of [...events].reverse())
+      if (
+        event.type === 'message.created' &&
+        event.message.role === 'assistant'
+      )
+        return event.message;
+    return undefined;
+  });
+
   onMount(() => {
     const unsubscribe = client.subscribe(() => {
       snapshot = client.getSnapshot();
@@ -51,6 +65,20 @@
     input = '';
     await act(() => client.sendMessage(activeId!, text));
   }
+  /** Arrow keys move the window so the drag strip is usable without a mouse. */
+  function move(event: KeyboardEvent) {
+    const step = event.shiftKey ? 1 : 16;
+    const offset: Record<string, [number, number]> = {
+      ArrowUp: [0, -step],
+      ArrowDown: [0, step],
+      ArrowLeft: [-step, 0],
+      ArrowRight: [step, 0],
+    };
+    const next = offset[event.key];
+    if (!next) return;
+    event.preventDefault();
+    void shell.moveWindow(next[0], next[1]);
+  }
 </script>
 
 <svelte:window
@@ -63,9 +91,10 @@
   <header>
     <button
       class="drag"
-      aria-label="拖动移动小聊天框"
+      aria-label="移动小聊天框：拖动，或用方向键移动（按住 Shift 微调）"
       title="拖动移动"
       onmousedown={() => void shell.startDrag()}
+      onkeydown={move}
     ></button>
     <div class="titles">
       <strong>{conversation?.title ?? '还没有对话'}</strong>
@@ -90,9 +119,25 @@
     </p>
   {/if}
 
+  <section class="work" aria-label="ONE 当前工作" aria-live="polite">
+    <p class="work-head">
+      {#if activeRun}<span class="dot" aria-hidden="true"></span>{/if}
+      {activeRun
+        ? `${agentName(activeRun.agentId)} 正在回复`
+        : lastReply
+          ? `${agentName(lastReply.agentId ?? 'chat')} · 上次回复`
+          : 'ONE 空闲'}
+    </p>
+    <p class="work-body">
+      {activeRun
+        ? liveText
+        : (lastReply?.content ?? '说一句话，这里就会开始。')}
+    </p>
+  </section>
+
   <div class="messages" aria-label="聊天记录">
     {#if events.length === 0}
-      <p class="empty">说一句话，这里和主窗口会同时出现。</p>
+      <p class="empty">历史会同时出现在主窗口。</p>
     {/if}
     {#each events as event (event.id)}
       {#if event.type === 'message.created'}
@@ -110,12 +155,6 @@
         <p class="divider">回复已停止</p>
       {/if}
     {/each}
-    {#if activeRun}
-      <p class="line">
-        <span class="who">{agentName(activeRun.agentId)} · 模拟回复中</span>
-        {snapshot.drafts[activeRun.id] || '正在准备回复…'}
-      </p>
-    {/if}
   </div>
 
   <div class="composer">
@@ -164,6 +203,8 @@
 </div>
 
 <style>
+  /* app.css paints :root; a rounded window needs the page behind it cleared. */
+  :global(html:root),
   :global(body) {
     background: transparent;
   }
@@ -237,6 +278,39 @@
     background: #fdf1ef;
     color: #8a3b2f;
     border-bottom: 1px solid #f2d8d2;
+  }
+  .work {
+    margin: 10px 12px 0;
+    padding: 10px 12px;
+    background: #eef2ea;
+    border: 1px solid #dbe3d4;
+    border-radius: 10px;
+    flex-shrink: 0;
+  }
+  .work-head {
+    margin: 0 0 4px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--accent);
+  }
+  .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  .work-body {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.6;
+    color: #303b35;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 108px;
+    overflow-y: auto;
   }
   .messages {
     flex: 1;
@@ -324,5 +398,19 @@
     margin: 0 0 8px;
     font-size: 12px;
     color: #8a3b2f;
+  }
+  @keyframes pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .dot {
+      animation: none;
+    }
   }
 </style>

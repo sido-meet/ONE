@@ -3,7 +3,12 @@ import { createMockClient } from '../../packages/mock-runtime/src';
 import { createHostClient } from './host';
 import { createProxyClient } from './proxy-client';
 import type { ServiceState } from './proxy-client';
-import { currentWindowLabel, nullTransport, tauriTransport } from './tauri';
+import {
+  currentWindowLabel,
+  missingShellCommands,
+  nullTransport,
+  tauriTransport,
+} from './tauri';
 
 /**
  * The composition root is the only UI-side import of the mock implementation.
@@ -28,3 +33,12 @@ export const windowLabel = label;
 
 export const disposeClient = () => (host ?? proxy)?.dispose();
 if (import.meta.hot) import.meta.hot.dispose(() => disposeClient());
+
+if (import.meta.env.DEV) {
+  void missingShellCommands().then((missing) => {
+    if (missing.length)
+      console.error(
+        `[ONE] 壳未实现这些命令，相关按钮会静默失效：${missing.join(', ')}`,
+      );
+  });
+}
