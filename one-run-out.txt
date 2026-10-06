@@ -1,1 +1,0 @@
-[ONE] 启动ONE 宠物：src-tauri\target\release\one-desktop.exe
