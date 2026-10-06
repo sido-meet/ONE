@@ -34,7 +34,9 @@ erDiagram
 
 消息和 Agent 切换目前位于事件的判别联合中，并非通用 `payload: any`。日期以带偏移的 RFC3339/ISO 时间存储；显示按用户时区转换。全天日程以后用单独的日期字段，避免强行按午夜 UTC 表示。
 
-## 已实现 OneClient
+## 已实现：会话运行时（ConversationRuntime）
+
+会话、Agent、Run 全在这一层，与领域能力无关。原 `OneClient` 同时挂着日历与笔记命令，换一个日历实现就等于把会话状态机一起换掉，因此已按 ADR-016 拆开。
 
 | 方法               | 输入 / 输出                    | 语义                                   |
 | ------------------ | ------------------------------ | -------------------------------------- |
@@ -46,9 +48,26 @@ erDiagram
 | cancelRun          | runId → void                   | 已结束则无操作；未知 Run 为 NOT_FOUND  |
 | dispose            | → void                         | 释放计时器与订阅，调用方不再使用该实例 |
 
-日历与笔记命令已按 P03 落到 `OneClient`：calendarList/Create/Update/Delete、notesList/Create/Update/Delete，签名统一为 `(context: CommandContext, input: unknown)`。参数故意是 `unknown`——IPC 或 MCP 边界不能靠 TypeScript 挡住，每次调用都由 `domain.ts` 的解析函数校验后才触碰状态。未在白名单内的命令在 host 侧直接丢弃。
+`Snapshot` **不再含** `notes` / `calendarEvents`：领域数据归提供方，挂在会话快照里意味着每次广播都捎带一次全量日历。
 
-错误类 ClientError 有 VALIDATION、NOT_FOUND、BUSY、DISPOSED、CONFLICT、UNAVAILABLE、TIMEOUT、INTERNAL。真实适配层以后补 PERMISSION_DENIED、RATE_LIMITED。CONFLICT 的 `details` 携带双方版本号，UI 据此保留两份草稿；错误包含可展示文案，日志不要输出密钥。
+## 已实现：领域端口（CalendarProvider / NotesProvider）
+
+`packages/contracts/src/provider.ts`。本体是唯一调用方；宠物、桌面端、命令行经本体的 `domains` 转发调用（见 `src/lib/core-link.ts`）。
+
+端口签名的输入是**已解析类型**（`CalendarCreateInput`、`NormalizedCalendarListInput` 等），不再是 `unknown`。校验只在本体边界发生一次，由 `domain.ts` 的 `parseXxx` 完成；提供方收到的一定是可信输入，它自己不再校验。这样「谁负责校验」收敛到唯一一处，换实现时不会漏也不会重复。未在白名单内的命令在本体侧直接拒绝。
+
+四类不可用必须彼此可分，`resolveProvider` 统一翻译（ADR-016）：
+
+| 情况         | code                | details.providerProblem.reason                            |
+| ------------ | ------------------- | --------------------------------------------------------- |
+| 根本没安装   | `UNAVAILABLE`       | `not-installed`（附带怎么装的引导）                       |
+| 装了但没运行 | `UNAVAILABLE`       | `not-running`（说的是连接不上，不是功能不存在）           |
+| 装了但没授权 | `PERMISSION_DENIED` | `not-authorized`，`missing` 列出缺哪几项权限              |
+| 版本对不上   | `CONFLICT`          | `version-conflict`，带 `providerVersion` 与 `coreVersion` |
+
+`reason` 是结构化的，文案会改它不会；界面靠它分流，不靠解析中文字符串。命令派发顺序是**先解析提供方、再校验输入**：提供方不可用时校验参数没有意义，报 VALIDATION 反而误导。
+
+`ClientError` 的 code：VALIDATION、NOT_FOUND、BUSY、DISPOSED、CONFLICT、UNAVAILABLE、PERMISSION_DENIED、TIMEOUT、INTERNAL。RATE_LIMITED 仍待真实适配层能抛出时再加。
 
 **接口演进约束**：当前 getSnapshot 同步是 UI 本地缓存接口。未来 IPC Client 要先异步握手加载缓存，再进入 ready；网络请求不得伪装成同步读取。扩展 `connect()/connectionState` 时一起更新 Mock 和契约测试，不承诺完全无需改 UI。
 

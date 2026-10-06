@@ -1,8 +1,13 @@
 import { ClientError } from '../../packages/contracts/src/index.ts';
 import type {
   AgentId,
+  CalendarEvent,
+  CalendarPage,
   CommandContext,
-  OneClient,
+  ConversationRuntime,
+  DeleteResult,
+  Note,
+  NotePage,
   Snapshot,
 } from '../../packages/contracts/src/index.ts';
 import type {
@@ -15,7 +20,7 @@ import type {
 /**
  * 一个 ONE 客户端与本体之间的全部往来（ADR-013）。
  *
- * 这一层只做协议：把 OneClient 的方法变成白名单命令帧，把本体推来的状态、
+ * 这一层只做协议：把 ConversationRuntime 的方法变成白名单命令帧，把本体推来的状态、
  * 回执与"别的客户端想调用你"的请求分派掉。它不持有任何对话状态——状态只有
  * 本体有，本地只留最近一次快照供渲染，并如实标记"还没拿到"。
  */
@@ -44,8 +49,6 @@ export const EMPTY_SNAPSHOT: Snapshot = {
   events: [],
   runs: [],
   drafts: {},
-  notes: [],
-  calendarEvents: [],
 };
 
 /** 本体多久不回就算它没在。慢于这个数的调用会得到 TIMEOUT 而不是永久挂起。 */
@@ -63,7 +66,22 @@ export interface CoreChannel {
 type RequestFrame = Extract<ClientMessage, { id: string }>;
 
 export interface CoreClient {
-  client: OneClient;
+  client: ConversationRuntime;
+  /** 领域能力经本体调用提供方；与会话运行时平级，不是它的方法。 */
+  domains: {
+    calendar: {
+      list(context: CommandContext, input: unknown): Promise<CalendarPage>;
+      create(context: CommandContext, input: unknown): Promise<CalendarEvent>;
+      update(context: CommandContext, input: unknown): Promise<CalendarEvent>;
+      remove(context: CommandContext, input: unknown): Promise<DeleteResult>;
+    };
+    notes: {
+      list(context: CommandContext, input: unknown): Promise<NotePage>;
+      create(context: CommandContext, input: unknown): Promise<Note>;
+      update(context: CommandContext, input: unknown): Promise<Note>;
+      remove(context: CommandContext, input: unknown): Promise<DeleteResult>;
+    };
+  };
   state(): CoreLinkState;
   connection(): CoreConnection | null;
   /** 本体每次状态变化或连接变化都通知一次，界面据此重画。 */
@@ -322,23 +340,34 @@ export function createCoreClient(
       sendMessage: (conversationId: string, text: string) =>
         call('sendMessage', [conversationId, text]),
       cancelRun: (runId: string) => call('cancelRun', [runId]),
-      calendarList: (context: CommandContext, input: unknown) =>
-        call('calendarList', [context, input]),
-      calendarCreate: (context: CommandContext, input: unknown) =>
-        call('calendarCreate', [context, input]),
-      calendarUpdate: (context: CommandContext, input: unknown) =>
-        call('calendarUpdate', [context, input]),
-      calendarDelete: (context: CommandContext, input: unknown) =>
-        call('calendarDelete', [context, input]),
-      notesList: (context: CommandContext, input: unknown) =>
-        call('notesList', [context, input]),
-      notesCreate: (context: CommandContext, input: unknown) =>
-        call('notesCreate', [context, input]),
-      notesUpdate: (context: CommandContext, input: unknown) =>
-        call('notesUpdate', [context, input]),
-      notesDelete: (context: CommandContext, input: unknown) =>
-        call('notesDelete', [context, input]),
       dispose,
+    },
+    /**
+     * 领域能力与 `client` 并列而非其中之一（ADR-016）：本体是唯一调用方，
+     * 这里只负责把请求送过去。没安装、没运行、没授权、版本冲突这四种情况
+     * 由本体裁决后抛回，前端据 `details.providerProblem.reason` 分流。
+     */
+    domains: {
+      calendar: {
+        list: (context: CommandContext, input: unknown) =>
+          call('calendarList', [context, input]) as Promise<CalendarPage>,
+        create: (context: CommandContext, input: unknown) =>
+          call('calendarCreate', [context, input]) as Promise<CalendarEvent>,
+        update: (context: CommandContext, input: unknown) =>
+          call('calendarUpdate', [context, input]) as Promise<CalendarEvent>,
+        remove: (context: CommandContext, input: unknown) =>
+          call('calendarDelete', [context, input]) as Promise<DeleteResult>,
+      },
+      notes: {
+        list: (context: CommandContext, input: unknown) =>
+          call('notesList', [context, input]) as Promise<NotePage>,
+        create: (context: CommandContext, input: unknown) =>
+          call('notesCreate', [context, input]) as Promise<Note>,
+        update: (context: CommandContext, input: unknown) =>
+          call('notesUpdate', [context, input]) as Promise<Note>,
+        remove: (context: CommandContext, input: unknown) =>
+          call('notesDelete', [context, input]) as Promise<DeleteResult>,
+      },
     },
     state: () => state,
     connection: () => connection,

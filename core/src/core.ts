@@ -1,26 +1,49 @@
 import { ClientError } from '../../packages/contracts/src/index.ts';
 import type {
   AgentId,
+  CalendarProvider,
   ClientInfo,
   ClientKind,
   ClientMessage,
   CommandContext,
+  ConversationRuntime,
   CoreMessage,
-  OneClient,
+  NotesProvider,
+  ProviderSlot,
   RosterEntry,
+} from '../../packages/contracts/src/index.ts';
+import {
+  parseCalendarCreate,
+  parseCalendarDelete,
+  parseCalendarList,
+  parseCalendarUpdate,
+  parseNotesCreate,
+  parseNotesDelete,
+  parseNotesList,
+  parseNotesUpdate,
+  resolveProvider,
 } from '../../packages/contracts/src/index.ts';
 import { WIRE_VERSION } from '../../packages/contracts/src/wire.ts';
 
 /**
  * ONE 本体的会话中枢（ADR-013）。
  *
- * 它持有唯一的 OneClient、执行白名单命令、广播带 revision 的快照，并充当
+ * 它持有唯一的会话运行时、执行白名单命令、广播带 revision 的快照，并充当
  * 客户端之间的调用中介：谁申报了什么能力，谁就能通过这里调用谁。传输层
  * （命名管道）不在这层，因此没有 socket 也能测试。
  */
 export interface Connection {
   send(message: CoreMessage): void;
   close(): void;
+}
+
+/**
+ * 本体持有的领域端口（ADR-016）。slot 为 undefined 表示「没安装」，
+ * 与「装了但没运行」是两种情况，由 resolveProvider 分开报错。
+ */
+export interface DomainPorts {
+  calendar?: ProviderSlot<CalendarProvider>;
+  notes?: ProviderSlot<NotesProvider>;
 }
 
 export interface CoreOptions {
@@ -31,6 +54,8 @@ export interface CoreOptions {
   capabilityTimeoutMs?: number;
   /** 由宿主注入的启动器；core 不认识任何具体可执行文件。 */
   launchClient?: (kind: ClientKind) => Promise<void> | void;
+  /** 领域能力提供方；未给的种类一律按「没安装」处理。 */
+  domains?: DomainPorts;
 }
 
 interface Session {
@@ -45,9 +70,10 @@ interface Session {
 
 const CAPABILITY_TIMEOUT_MS = 5000;
 
-export function createCore(client: OneClient, options: CoreOptions) {
+export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
   const sessions = new Map<string, Session>();
   const installed = new Set<ClientKind>(options.installed ?? ['pet']);
+  const domains = options.domains ?? {};
   let revision = 0;
 
   const roster = (): RosterEntry[] =>
@@ -62,38 +88,70 @@ export function createCore(client: OneClient, options: CoreOptions) {
 
   const pushState = () => {
     revision += 1;
-    broadcast({ t: 'state', revision, snapshot: client.getSnapshot() });
+    broadcast({ t: 'state', revision, snapshot: runtime.getSnapshot() });
   };
 
   const pushRoster = () => {
     broadcast({ t: 'roster', clients: roster(), installed: [...installed] });
   };
 
-  /** Whitelisted dispatch: the name arrives over the wire and is never trusted. */
+  const contextOf = (args: unknown[]) => args[0] as CommandContext;
+
+  /**
+   * Whitelisted dispatch: the name arrives over the wire and is never trusted.
+   *
+   * 领域命令的顺序是「先解析提供方，再校验输入」：提供方不可用时校验参数没有
+   * 意义，用户根本没机会把参数填对，报 VALIDATION 反而误导。可用性、授权与
+   * 版本由 resolveProvider 统一翻译成本体裁决过的四种语义（ADR-016）。
+   */
   const commands: Record<string, (...args: unknown[]) => Promise<unknown>> = {
     createConversation: (...args) =>
-      client.createConversation(args[0] as string | undefined),
+      runtime.createConversation(args[0] as string | undefined),
     changeAgent: (...args) =>
-      client.changeAgent(args[0] as string, args[1] as AgentId),
+      runtime.changeAgent(args[0] as string, args[1] as AgentId),
     sendMessage: (...args) =>
-      client.sendMessage(args[0] as string, args[1] as string),
-    cancelRun: (...args) => client.cancelRun(args[0] as string),
+      runtime.sendMessage(args[0] as string, args[1] as string),
+    cancelRun: (...args) => runtime.cancelRun(args[0] as string),
     calendarList: (...args) =>
-      client.calendarList(args[0] as CommandContext, args[1]),
+      resolveProvider(domains.calendar, 'calendar').list(
+        contextOf(args),
+        parseCalendarList(args[1]),
+      ),
     calendarCreate: (...args) =>
-      client.calendarCreate(args[0] as CommandContext, args[1]),
+      resolveProvider(domains.calendar, 'calendar').create(
+        contextOf(args),
+        parseCalendarCreate(args[1]),
+      ),
     calendarUpdate: (...args) =>
-      client.calendarUpdate(args[0] as CommandContext, args[1]),
+      resolveProvider(domains.calendar, 'calendar').update(
+        contextOf(args),
+        parseCalendarUpdate(args[1]),
+      ),
     calendarDelete: (...args) =>
-      client.calendarDelete(args[0] as CommandContext, args[1]),
+      resolveProvider(domains.calendar, 'calendar').remove(
+        contextOf(args),
+        parseCalendarDelete(args[1]),
+      ),
     notesList: (...args) =>
-      client.notesList(args[0] as CommandContext, args[1]),
+      resolveProvider(domains.notes, 'notes').list(
+        contextOf(args),
+        parseNotesList(args[1]),
+      ),
     notesCreate: (...args) =>
-      client.notesCreate(args[0] as CommandContext, args[1]),
+      resolveProvider(domains.notes, 'notes').create(
+        contextOf(args),
+        parseNotesCreate(args[1]),
+      ),
     notesUpdate: (...args) =>
-      client.notesUpdate(args[0] as CommandContext, args[1]),
+      resolveProvider(domains.notes, 'notes').update(
+        contextOf(args),
+        parseNotesUpdate(args[1]),
+      ),
     notesDelete: (...args) =>
-      client.notesDelete(args[0] as CommandContext, args[1]),
+      resolveProvider(domains.notes, 'notes').remove(
+        contextOf(args),
+        parseNotesDelete(args[1]),
+      ),
   };
 
   const describe = (error: unknown) =>
@@ -345,7 +403,7 @@ export function createCore(client: OneClient, options: CoreOptions) {
     pushRoster();
   };
 
-  const unsubscribe = client.subscribe(() => pushState());
+  const unsubscribe = runtime.subscribe(() => pushState());
 
   return {
     connect,
@@ -358,7 +416,7 @@ export function createCore(client: OneClient, options: CoreOptions) {
       installed.add(kind);
       pushRoster();
     },
-    snapshot: () => ({ revision, snapshot: client.getSnapshot() }),
+    snapshot: () => ({ revision, snapshot: runtime.getSnapshot() }),
   };
 }
 

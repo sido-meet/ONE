@@ -1,14 +1,17 @@
 import { ClientError } from '../../contracts/src/index.ts';
-import { createDomainCommands, createDomainState } from './domain.ts';
+import { createMemoryProviders } from './domain.ts';
 import type {
   AgentId,
   Conversation,
+  ConversationRuntime,
   DurableEvent,
   Message,
-  OneClient,
   Run,
   Snapshot,
 } from '../../contracts/src/index.ts';
+
+export { createMemoryProviders } from './domain.ts';
+export type { MemoryProviders } from './domain.ts';
 
 export const agents: { id: AgentId; name: string }[] = [
   { id: 'chat', name: 'Chat Agent' },
@@ -21,9 +24,10 @@ type EventInput =
   | { type: 'run.started'; run: Run }
   | { type: 'run.finished'; run: Run };
 
-export function createMockClient(options: { tickMs?: number } = {}): OneClient {
-  const domain = createDomainState();
-  const state: Omit<Snapshot, 'notes' | 'calendarEvents'> = {
+export function createMockClient(
+  options: { tickMs?: number } = {},
+): ConversationRuntime {
+  const state: Snapshot = {
     workspaces: [{ id: 'personal', name: '个人空间' }],
     conversations: [
       {
@@ -83,15 +87,8 @@ export function createMockClient(options: { tickMs?: number } = {}): OneClient {
     append(run.conversationId, { type: 'run.finished', run });
     notify();
   };
-  const commands = createDomainCommands(domain, { notify, assertOpen });
   return {
-    ...commands,
-    getSnapshot: () =>
-      structuredClone({
-        ...state,
-        notes: domain.notes,
-        calendarEvents: domain.calendarEvents,
-      }),
+    getSnapshot: () => structuredClone(state),
     subscribe(listener) {
       assertOpen();
       listeners.add(listener);

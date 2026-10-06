@@ -2,7 +2,11 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type net from 'node:net';
 import path from 'node:path';
-import { createMockClient } from '../../packages/mock-runtime/src/index.ts';
+import {
+  createMemoryProviders,
+  createMockClient,
+} from '../../packages/mock-runtime/src/index.ts';
+import { PROVIDER_CONTRACT_VERSION } from '../../packages/contracts/src/index.ts';
 import { isClientKind } from '../../packages/contracts/src/wire.ts';
 import type { ClientKind } from '../../packages/contracts/src/index.ts';
 import { createCore } from './core.ts';
@@ -47,11 +51,35 @@ async function launchClient(kind: ClientKind) {
 }
 
 const installed = readInstalled();
-const client = createMockClient();
-const core = createCore(client, {
+const runtime = createMockClient();
+
+/**
+ * 领域端口的**进程内**实现，用来验证端口契约本身（ADR-016 允许实现先在进程内）。
+ *
+ * 它不是插件进程：数据不落盘、本体崩溃即丢失、页面还没有。真正的外部提供方是
+ * D03 的事。所以这里只能说"接口通了"，不能说"日历可用了"。
+ */
+const memory = createMemoryProviders();
+const core = createCore(runtime, {
   version,
   installed,
   launchClient,
+  domains: {
+    calendar: {
+      id: 'local.calendar',
+      kind: 'calendar',
+      status: 'ready',
+      providerVersion: PROVIDER_CONTRACT_VERSION,
+      provider: memory.calendar,
+    },
+    notes: {
+      id: 'local.notes',
+      kind: 'notes',
+      status: 'ready',
+      providerVersion: PROVIDER_CONTRACT_VERSION,
+      provider: memory.notes,
+    },
+  },
 });
 
 let server: net.Server;

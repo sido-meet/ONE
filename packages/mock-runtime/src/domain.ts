@@ -1,24 +1,17 @@
-import { ClientError } from '../../contracts/src/index.ts';
 import {
   assertValidRange,
-  parseCalendarCreate,
-  parseCalendarDelete,
-  parseCalendarList,
-  parseCalendarUpdate,
-  parseNotesCreate,
-  parseNotesDelete,
-  parseNotesList,
-  parseNotesUpdate,
+  ClientError,
   requestDigest,
 } from '../../contracts/src/index.ts';
 import type {
   CalendarEvent,
-  CalendarPage,
+  CalendarProvider,
   CommandContext,
   DeleteResult,
   Note,
   NotePage,
   NoteSummary,
+  NotesProvider,
 } from '../../contracts/src/index.ts';
 
 export interface AuditEntry {
@@ -29,51 +22,46 @@ export interface AuditEntry {
   deletedAt: string;
 }
 
-export interface DomainState {
+interface MemoryState {
   notes: Note[];
   calendarEvents: CalendarEvent[];
   audits: AuditEntry[];
 }
 
-export interface DomainHooks {
-  notify(): void;
-  assertOpen(): void;
-}
-
-export interface DomainCommands {
-  calendarList(context: CommandContext, input: unknown): Promise<CalendarPage>;
-  calendarCreate(
-    context: CommandContext,
-    input: unknown,
-  ): Promise<CalendarEvent>;
-  calendarUpdate(
-    context: CommandContext,
-    input: unknown,
-  ): Promise<CalendarEvent>;
-  calendarDelete(
-    context: CommandContext,
-    input: unknown,
-  ): Promise<DeleteResult>;
-  notesList(context: CommandContext, input: unknown): Promise<NotePage>;
-  notesCreate(context: CommandContext, input: unknown): Promise<Note>;
-  notesUpdate(context: CommandContext, input: unknown): Promise<Note>;
-  notesDelete(context: CommandContext, input: unknown): Promise<DeleteResult>;
-}
-
-export function createDomainState(): DomainState {
-  return { notes: [], calendarEvents: [], audits: [] };
-}
-
 /**
- * Prototype domain service. Calendar and Notes are mutable entities, not an
- * append-only stream: `version` guards concurrent edits and an idempotency
- * receipt makes a repeated confirmation harmless. Nothing here is persisted.
+ * 内存版提供方，用来验证端口契约（ADR-016）。
+ *
+ * 它**不做输入校验**：校验只在本体边界发生一次（domain.ts 的 parseXxx），
+ * 因此这里收到的一定是已解析类型。省掉校验不是疏忽，而是把「谁负责校验」
+ * 这件事收敛到唯一一处 —— 换实现时不会漏掉，也不会重复。
+ *
+ * 领域状态也不再有 notify 钩子指向会话：会话快照不含日历与笔记，创建日程
+ * 不该让对话界面重绘。
  */
-export function createDomainCommands(
-  state: DomainState,
-  hooks: DomainHooks,
-): DomainCommands {
+export interface MemoryProviders {
+  calendar: CalendarProvider;
+  notes: NotesProvider;
+  /** 测试与调试用；返回快照式的拷贝，改它不影响提供方内部。 */
+  read(): {
+    notes: Note[];
+    calendarEvents: CalendarEvent[];
+    audits: AuditEntry[];
+  };
+  /** 仅供提供方自身刷新用（ADR-018 的摘要条），与会话订阅无关。 */
+  subscribe(listener: () => void): () => void;
+  dispose(): void;
+}
+
+export function createMemoryProviders(): MemoryProviders {
+  const state: MemoryState = { notes: [], calendarEvents: [], audits: [] };
   const receipts = new Map<string, { digest: string; result: unknown }>();
+  const listeners = new Set<() => void>();
+  let disposed = false;
+
+  const assertOpen = () => {
+    if (disposed) throw new ClientError('DISPOSED', '领域服务已关闭');
+  };
+  const notify = () => listeners.forEach((listener) => listener());
 
   const replay = <T>(
     workspaceId: string,
@@ -143,12 +131,11 @@ export function createDomainCommands(
       : { items: slice };
   };
 
-  return {
-    async calendarList(context, input) {
-      hooks.assertOpen();
-      const parsed = parseCalendarList(input);
-      const start = Date.parse(parsed.rangeStart);
-      const end = Date.parse(parsed.rangeEnd);
+  const calendar: CalendarProvider = {
+    async list(context, input) {
+      assertOpen();
+      const start = Date.parse(input.rangeStart);
+      const end = Date.parse(input.rangeEnd);
       const items = state.calendarEvents
         .filter((item) => item.workspaceId === context.workspaceId)
         .filter(
@@ -157,97 +144,94 @@ export function createDomainCommands(
         )
         .sort((a, b) => Date.parse(a.startsAt) - Date.parse(b.startsAt))
         .map((item) => structuredClone(item));
-      return paginate(items, parsed.cursor, parsed.limit);
+      return paginate(items, input.cursor, input.limit);
     },
 
-    async calendarCreate(context, input) {
-      hooks.assertOpen();
-      const parsed = parseCalendarCreate(input);
-      const digest = requestDigest(parsed);
+    async create(context, input) {
+      assertOpen();
+      const digest = requestDigest(input);
       const replayed = replay<CalendarEvent>(
         context.workspaceId,
-        parsed.idempotencyKey,
+        input.idempotencyKey,
         digest,
       );
       if (replayed) return replayed;
       const event: CalendarEvent = {
         id: crypto.randomUUID(),
         workspaceId: context.workspaceId,
-        title: parsed.title,
-        startsAt: parsed.startsAt,
-        endsAt: parsed.endsAt,
-        timeZone: parsed.timeZone,
+        title: input.title,
+        startsAt: input.startsAt,
+        endsAt: input.endsAt,
+        timeZone: input.timeZone,
         version: 1,
       };
-      if (parsed.sourceConversationId)
-        event.sourceConversationId = parsed.sourceConversationId;
+      if (input.sourceConversationId)
+        event.sourceConversationId = input.sourceConversationId;
       state.calendarEvents.push(event);
-      remember(context.workspaceId, parsed.idempotencyKey, digest, event);
-      hooks.notify();
+      remember(context.workspaceId, input.idempotencyKey, digest, event);
+      notify();
       return structuredClone(event);
     },
 
-    async calendarUpdate(context, input) {
-      hooks.assertOpen();
-      const parsed = parseCalendarUpdate(input);
-      const digest = requestDigest(parsed);
+    async update(context, input) {
+      assertOpen();
+      const digest = requestDigest(input);
       const replayed = replay<CalendarEvent>(
         context.workspaceId,
-        parsed.idempotencyKey,
+        input.idempotencyKey,
         digest,
       );
       if (replayed) return replayed;
-      const current = findEvent(context, parsed.id);
-      guardVersion(current, parsed.expectedVersion, '日程');
+      const current = findEvent(context, input.id);
+      guardVersion(current, input.expectedVersion, '日程');
       assertValidRange(
-        parsed.patch.startsAt ?? current.startsAt,
-        parsed.patch.endsAt ?? current.endsAt,
+        input.patch.startsAt ?? current.startsAt,
+        input.patch.endsAt ?? current.endsAt,
       );
-      Object.assign(current, parsed.patch);
+      Object.assign(current, input.patch);
       current.version += 1;
-      remember(context.workspaceId, parsed.idempotencyKey, digest, current);
-      hooks.notify();
+      remember(context.workspaceId, input.idempotencyKey, digest, current);
+      notify();
       return structuredClone(current);
     },
 
-    async calendarDelete(context, input) {
-      hooks.assertOpen();
-      const parsed = parseCalendarDelete(input);
-      const digest = requestDigest(parsed);
+    async remove(context, input) {
+      assertOpen();
+      const digest = requestDigest(input);
       const replayed = replay<DeleteResult>(
         context.workspaceId,
-        parsed.idempotencyKey,
+        input.idempotencyKey,
         digest,
       );
       if (replayed) return replayed;
-      const current = findEvent(context, parsed.id);
-      guardVersion(current, parsed.expectedVersion, '日程');
-      const index = state.calendarEvents.indexOf(current);
-      state.calendarEvents.splice(index, 1);
+      const current = findEvent(context, input.id);
+      guardVersion(current, input.expectedVersion, '日程');
+      state.calendarEvents.splice(state.calendarEvents.indexOf(current), 1);
       const deletedAt = new Date().toISOString();
       const auditRef = crypto.randomUUID();
       state.audits.push({
         auditRef,
         entityType: 'calendarEvent',
-        id: parsed.id,
+        id: input.id,
         workspaceId: context.workspaceId,
         deletedAt,
       });
       const result: DeleteResult = {
         entityType: 'calendarEvent',
-        id: parsed.id,
+        id: input.id,
         auditRef,
         deletedAt,
       };
-      remember(context.workspaceId, parsed.idempotencyKey, digest, result);
-      hooks.notify();
+      remember(context.workspaceId, input.idempotencyKey, digest, result);
+      notify();
       return structuredClone(result);
     },
+  };
 
-    async notesList(context, input) {
-      hooks.assertOpen();
-      const parsed = parseNotesList(input);
-      const keyword = parsed.query?.toLowerCase();
+  const notes: NotesProvider = {
+    async list(context, input): Promise<NotePage> {
+      assertOpen();
+      const keyword = input.query?.toLowerCase();
       const summaries: NoteSummary[] = state.notes
         .filter((note) => note.workspaceId === context.workspaceId)
         .filter(
@@ -266,16 +250,15 @@ export function createDomainCommands(
             ? { sourceConversationId: note.sourceConversationId }
             : {}),
         }));
-      return paginate(summaries, parsed.cursor, parsed.limit);
+      return paginate(summaries, input.cursor, input.limit);
     },
 
-    async notesCreate(context, input) {
-      hooks.assertOpen();
-      const parsed = parseNotesCreate(input);
-      const digest = requestDigest(parsed);
+    async create(context, input) {
+      assertOpen();
+      const digest = requestDigest(input);
       const replayed = replay<Note>(
         context.workspaceId,
-        parsed.idempotencyKey,
+        input.idempotencyKey,
         digest,
       );
       if (replayed) return replayed;
@@ -283,71 +266,85 @@ export function createDomainCommands(
       const note: Note = {
         id: crypto.randomUUID(),
         workspaceId: context.workspaceId,
-        title: parsed.title,
-        body: parsed.body,
+        title: input.title,
+        body: input.body,
         version: 1,
         createdAt: now,
         updatedAt: now,
       };
-      if (parsed.sourceConversationId)
-        note.sourceConversationId = parsed.sourceConversationId;
+      if (input.sourceConversationId)
+        note.sourceConversationId = input.sourceConversationId;
       state.notes.push(note);
-      remember(context.workspaceId, parsed.idempotencyKey, digest, note);
-      hooks.notify();
+      remember(context.workspaceId, input.idempotencyKey, digest, note);
+      notify();
       return structuredClone(note);
     },
 
-    async notesUpdate(context, input) {
-      hooks.assertOpen();
-      const parsed = parseNotesUpdate(input);
-      const digest = requestDigest(parsed);
+    async update(context, input) {
+      assertOpen();
+      const digest = requestDigest(input);
       const replayed = replay<Note>(
         context.workspaceId,
-        parsed.idempotencyKey,
+        input.idempotencyKey,
         digest,
       );
       if (replayed) return replayed;
-      const current = findNote(context, parsed.id);
-      guardVersion(current, parsed.expectedVersion, '笔记');
-      Object.assign(current, parsed.patch);
+      const current = findNote(context, input.id);
+      guardVersion(current, input.expectedVersion, '笔记');
+      Object.assign(current, input.patch);
       current.version += 1;
       current.updatedAt = new Date().toISOString();
-      remember(context.workspaceId, parsed.idempotencyKey, digest, current);
-      hooks.notify();
+      remember(context.workspaceId, input.idempotencyKey, digest, current);
+      notify();
       return structuredClone(current);
     },
 
-    async notesDelete(context, input) {
-      hooks.assertOpen();
-      const parsed = parseNotesDelete(input);
-      const digest = requestDigest(parsed);
+    async remove(context, input) {
+      assertOpen();
+      const digest = requestDigest(input);
       const replayed = replay<DeleteResult>(
         context.workspaceId,
-        parsed.idempotencyKey,
+        input.idempotencyKey,
         digest,
       );
       if (replayed) return replayed;
-      const current = findNote(context, parsed.id);
-      guardVersion(current, parsed.expectedVersion, '笔记');
+      const current = findNote(context, input.id);
+      guardVersion(current, input.expectedVersion, '笔记');
       state.notes.splice(state.notes.indexOf(current), 1);
       const deletedAt = new Date().toISOString();
       const auditRef = crypto.randomUUID();
       state.audits.push({
         auditRef,
         entityType: 'note',
-        id: parsed.id,
+        id: input.id,
         workspaceId: context.workspaceId,
         deletedAt,
       });
       const result: DeleteResult = {
         entityType: 'note',
-        id: parsed.id,
+        id: input.id,
         auditRef,
         deletedAt,
       };
-      remember(context.workspaceId, parsed.idempotencyKey, digest, result);
-      hooks.notify();
+      remember(context.workspaceId, input.idempotencyKey, digest, result);
+      notify();
       return structuredClone(result);
+    },
+  };
+
+  return {
+    calendar,
+    notes,
+    read: () => structuredClone(state),
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    dispose() {
+      listeners.clear();
+      disposed = true;
     },
   };
 }

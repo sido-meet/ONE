@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMockClient } from '../../packages/mock-runtime/src/index.ts';
-import type { OneClient } from '../../packages/contracts/src/index.ts';
+import type { ConversationRuntime } from '../../packages/contracts/src/index.ts';
 import type {
   ClientMessage,
   CoreMessage,
@@ -41,7 +41,7 @@ const lastResult = (client: ReturnType<typeof fakeClient>) => {
   return last;
 };
 
-let client: OneClient;
+let client: ConversationRuntime;
 let core: Core;
 
 beforeEach(() => {

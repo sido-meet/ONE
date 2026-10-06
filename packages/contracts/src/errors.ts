@@ -1,7 +1,11 @@
 /**
- * Domain error codes. PERMISSION_DENIED and RATE_LIMITED stay out until a real
- * adapter can raise them; the rest are reachable from the 0.1 prototype,
- * including the cross-window protocol (UNAVAILABLE / TIMEOUT / INTERNAL).
+ * Domain error codes. RATE_LIMITED stays out until a real adapter can raise it;
+ * the rest are reachable, including the cross-window protocol
+ * (UNAVAILABLE / TIMEOUT / INTERNAL).
+ *
+ * PERMISSION_DENIED arrived with the provider ports (ADR-016): an installed
+ * provider that the user has not authorized must not collapse into the same
+ * message as "no calendar source is set up".
  */
 export type ErrorCode =
   | 'NOT_FOUND'
@@ -10,6 +14,7 @@ export type ErrorCode =
   | 'DISPOSED'
   | 'CONFLICT'
   | 'UNAVAILABLE'
+  | 'PERMISSION_DENIED'
   | 'TIMEOUT'
   | 'INTERNAL';
 

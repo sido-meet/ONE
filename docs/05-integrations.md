@@ -2,7 +2,7 @@
 
 ## 三种接口各自的用途
 
-- OneClient：ONE 界面的业务接口。
+- 会话运行时（ConversationRuntime）与领域端口（CalendarProvider / NotesProvider）：ONE 自己的业务接口，领域端口由本体持有并调用提供方（ADR-016）。
 - MCP：把日历、笔记等领域能力暴露给模型/Agent。协议定义 tools/resources/prompts，[官方架构](https://modelcontextprotocol.io/specification/2025-11-25/architecture)。
 - Agent Connector：接入完整 Agent，优先探测 ACP，其次官方 SDK，再考虑文档化的进程协议。ACP 处理 Client/Agent 通信，[官方概述](https://agentclientprotocol.com/protocol/v1/overview)。
 

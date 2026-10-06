@@ -1,10 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createMockClient } from './index.ts';
-import type { CommandContext, OneClient } from '../../contracts/src/index.ts';
+import { createMemoryProviders } from './domain.ts';
+import type { MemoryProviders } from './domain.ts';
+import {
+  parseCalendarCreate,
+  parseCalendarList,
+  parseNotesCreate,
+  parseNotesUpdate,
+} from '../../contracts/src/index.ts';
+import type { CommandContext } from '../../contracts/src/index.ts';
 
-let client: OneClient;
+let providers: MemoryProviders;
 afterEach(() => {
-  client?.dispose();
+  providers?.dispose();
 });
 
 const ctx = (overrides: Partial<CommandContext> = {}): CommandContext => ({
@@ -21,22 +28,35 @@ const meeting = {
   timeZone: 'Asia/Shanghai',
 };
 
-describe('Calendar and Notes contracts', () => {
+/** 走真实链路：先在边界解析，再交给端口。提供方自己不再校验（ADR-016）。 */
+const createEvent = (context: CommandContext, raw: Record<string, unknown>) =>
+  providers.calendar.create(context, parseCalendarCreate(raw));
+
+const listEvents = (context: CommandContext, raw: Record<string, unknown>) =>
+  providers.calendar.list(context, parseCalendarList(raw));
+
+const createNote = (context: CommandContext, raw: Record<string, unknown>) =>
+  providers.notes.create(context, parseNotesCreate(raw));
+
+const updateNote = (context: CommandContext, raw: Record<string, unknown>) =>
+  providers.notes.update(context, parseNotesUpdate(raw));
+
+describe('Calendar and Notes provider contracts', () => {
   it('creates one event per idempotency key and replays the same result', async () => {
-    client = createMockClient();
+    providers = createMemoryProviders();
     const input = { ...meeting, idempotencyKey: 'confirm-1' };
-    const first = await client.calendarCreate(ctx(), input);
-    const second = await client.calendarCreate(ctx(), input);
+    const first = await createEvent(ctx(), input);
+    const second = await createEvent(ctx(), input);
     expect(second).toEqual(first);
-    expect(client.getSnapshot().calendarEvents).toHaveLength(1);
+    expect(providers.read().calendarEvents).toHaveLength(1);
     expect(first.version).toBe(1);
   });
 
   it('rejects the same key reused for a different request', async () => {
-    client = createMockClient();
-    await client.calendarCreate(ctx(), { ...meeting, idempotencyKey: 'k1' });
+    providers = createMemoryProviders();
+    await createEvent(ctx(), { ...meeting, idempotencyKey: 'k1' });
     await expect(
-      client.calendarCreate(ctx(), {
+      createEvent(ctx(), {
         ...meeting,
         title: '另一个日程',
         idempotencyKey: 'k1',
@@ -45,17 +65,17 @@ describe('Calendar and Notes contracts', () => {
       code: 'CONFLICT',
       details: { idempotencyKey: 'k1' },
     });
-    expect(client.getSnapshot().calendarEvents).toHaveLength(1);
+    expect(providers.read().calendarEvents).toHaveLength(1);
   });
 
   it('keeps the newer note version when a stale writer retries', async () => {
-    client = createMockClient();
-    const note = await client.notesCreate(ctx(), {
+    providers = createMemoryProviders();
+    const note = await createNote(ctx(), {
       title: '会议记录',
       body: '第一版',
       idempotencyKey: 'n1',
     });
-    const updated = await client.notesUpdate(ctx(), {
+    const updated = await updateNote(ctx(), {
       id: note.id,
       expectedVersion: 1,
       patch: { body: '第二版' },
@@ -63,7 +83,7 @@ describe('Calendar and Notes contracts', () => {
     });
     expect(updated).toMatchObject({ version: 2, body: '第二版' });
     await expect(
-      client.notesUpdate(ctx(), {
+      updateNote(ctx(), {
         id: note.id,
         expectedVersion: 1,
         patch: { body: '过期写入' },
@@ -74,52 +94,44 @@ describe('Calendar and Notes contracts', () => {
       details: { expectedVersion: 1, currentVersion: 2 },
     });
     // The rejected draft must not overwrite anything.
-    expect(client.getSnapshot().notes[0]).toMatchObject({
+    expect(providers.read().notes[0]).toMatchObject({
       version: 2,
       body: '第二版',
     });
   });
 
-  it('validates time, time zone and unknown fields at the boundary', async () => {
-    client = createMockClient();
-    const create = (patch: Record<string, unknown>) =>
-      client.calendarCreate(ctx(), {
+  it('validates time, time zone and unknown fields at the boundary', () => {
+    providers = createMemoryProviders();
+    const invalid = (patch: Record<string, unknown>) => () =>
+      parseCalendarCreate({
         ...meeting,
         idempotencyKey: 'v',
         ...patch,
       });
-    await expect(
-      create({
+    expect(
+      invalid({
         startsAt: '2026-10-07T16:00:00+08:00',
         endsAt: '2026-10-07T15:00:00+08:00',
       }),
-    ).rejects.toMatchObject({ code: 'VALIDATION' });
-    await expect(
-      create({ endsAt: '2026-10-07T16:00:00' }),
-    ).rejects.toMatchObject({
-      code: 'VALIDATION',
-    });
-    await expect(create({ timeZone: 'Mars/Olympus' })).rejects.toMatchObject({
-      code: 'VALIDATION',
-    });
-    await expect(create({ unknownField: 1 })).rejects.toMatchObject({
-      code: 'VALIDATION',
-    });
-    await expect(
-      client.notesUpdate(ctx(), {
+    ).toThrow();
+    expect(invalid({ endsAt: '2026-10-07T16:00:00' })).toThrow();
+    expect(invalid({ timeZone: 'Mars/Olympus' })).toThrow();
+    expect(invalid({ unknownField: 1 })).toThrow();
+    expect(() =>
+      parseNotesUpdate({
         id: 'n',
         expectedVersion: 1,
         patch: {},
         idempotencyKey: 'v',
       }),
-    ).rejects.toMatchObject({ code: 'VALIDATION' });
-    expect(client.getSnapshot().calendarEvents).toHaveLength(0);
+    ).toThrow();
+    expect(providers.read().calendarEvents).toHaveLength(0);
   });
 
   it('lists overlapping events in range with a working cursor', async () => {
-    client = createMockClient();
+    providers = createMemoryProviders();
     for (const [index, day] of ['07', '08', '09'].entries()) {
-      await client.calendarCreate(ctx(), {
+      await createEvent(ctx(), {
         ...meeting,
         title: `第 ${index + 1} 天`,
         startsAt: `2026-10-${day}T09:00:00+08:00`,
@@ -128,7 +140,7 @@ describe('Calendar and Notes contracts', () => {
       });
     }
     // Ends exactly at rangeStart, so it must not show up as an overlap.
-    await client.calendarCreate(ctx(), {
+    await createEvent(ctx(), {
       ...meeting,
       title: '前一天',
       startsAt: '2026-10-06T09:00:00+08:00',
@@ -140,13 +152,13 @@ describe('Calendar and Notes contracts', () => {
       rangeEnd: '2026-10-10T00:00:00+08:00',
       timeZone: 'Asia/Shanghai',
     };
-    const first = await client.calendarList(ctx(), { ...range, limit: 2 });
+    const first = await listEvents(ctx(), { ...range, limit: 2 });
     expect(first.items.map((item) => item.title)).toEqual([
       '第 1 天',
       '第 2 天',
     ]);
     expect(first.nextCursor).toBe('2');
-    const second = await client.calendarList(ctx(), {
+    const second = await listEvents(ctx(), {
       ...range,
       limit: 2,
       cursor: first.nextCursor,
@@ -156,81 +168,91 @@ describe('Calendar and Notes contracts', () => {
   });
 
   it('returns note summaries without bodies and filters by keyword', async () => {
-    client = createMockClient();
-    await client.notesCreate(ctx(), {
+    providers = createMemoryProviders();
+    await createNote(ctx(), {
       title: '路线图',
       body: '宠物窗口优先',
       idempotencyKey: 'a',
     });
-    await client.notesCreate(ctx(), {
+    await createNote(ctx(), {
       title: '采购清单',
       body: '键盘',
       idempotencyKey: 'b',
     });
-    const all = await client.notesList(ctx(), {});
+    const all = await providers.notes.list(ctx(), { limit: 20 });
     expect(all.items).toHaveLength(2);
     expect(all.items[0]).not.toHaveProperty('body');
-    const found = await client.notesList(ctx(), { query: '键盘' });
+    const found = await providers.notes.list(ctx(), {
+      query: '键盘',
+      limit: 20,
+    });
     expect(found.items.map((item) => item.title)).toEqual(['采购清单']);
   });
 
   it('deletes once per key and leaves an audit reference', async () => {
-    client = createMockClient();
-    const note = await client.notesCreate(ctx(), {
+    providers = createMemoryProviders();
+    const note = await createNote(ctx(), {
       title: '待删除',
       body: '',
       idempotencyKey: 'd1',
     });
     const input = { id: note.id, expectedVersion: 1, idempotencyKey: 'd2' };
-    const first = await client.notesDelete(ctx(), input);
-    const again = await client.notesDelete(ctx(), input);
+    const first = await providers.notes.remove(ctx(), input);
+    const again = await providers.notes.remove(ctx(), input);
     expect(again).toEqual(first);
     expect(first.auditRef).toBeTruthy();
     await expect(
-      client.notesDelete(ctx(), { ...input, idempotencyKey: 'd3' }),
+      providers.notes.remove(ctx(), { ...input, idempotencyKey: 'd3' }),
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });
-    expect(client.getSnapshot().notes).toHaveLength(0);
+    expect(providers.read().notes).toHaveLength(0);
   });
 
-  it('keeps workspaces separate and reports disposed clients', async () => {
-    client = createMockClient();
+  it('keeps workspaces separate and reports disposed providers', async () => {
+    providers = createMemoryProviders();
     const other = ctx({ workspaceId: 'work' });
-    const note = await client.notesCreate(other, {
+    const note = await createNote(other, {
       title: '公司笔记',
       body: '',
       idempotencyKey: 'shared',
     });
-    expect((await client.notesList(ctx(), {})).items).toHaveLength(0);
+    expect(
+      (await providers.notes.list(ctx(), { limit: 20 })).items,
+    ).toHaveLength(0);
     await expect(
-      client.notesUpdate(ctx(), {
+      updateNote(ctx(), {
         id: note.id,
         expectedVersion: 1,
         patch: { title: '越权' },
         idempotencyKey: 'x',
       }),
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });
-    const local = await client.notesCreate(ctx(), {
+    const local = await createNote(ctx(), {
       title: '个人笔记',
       body: '',
       idempotencyKey: 'shared',
     });
     expect(local.id).not.toBe(note.id);
-    client.dispose();
-    await expect(client.notesList(ctx(), {})).rejects.toMatchObject({
-      code: 'DISPOSED',
-    });
+    providers.dispose();
+    await expect(
+      providers.notes.list(ctx(), { limit: 20 }),
+    ).rejects.toMatchObject({ code: 'DISPOSED' });
   });
 
-  it('notifies subscribers on domain changes and isolates snapshot copies', async () => {
-    client = createMockClient();
+  it('hands out copies and notifies its own subscribers, not the session', async () => {
+    providers = createMemoryProviders();
     const listener = vi.fn();
-    client.subscribe(listener);
-    await client.calendarCreate(ctx(), { ...meeting, idempotencyKey: 'n' });
+    const stop = providers.subscribe(listener);
+    await createEvent(ctx(), { ...meeting, idempotencyKey: 'n' });
     expect(listener).toHaveBeenCalledTimes(1);
-    await client.notesList(ctx(), {});
+    await providers.notes.list(ctx(), { limit: 20 });
     expect(listener).toHaveBeenCalledTimes(1);
-    const snapshot = client.getSnapshot();
-    snapshot.calendarEvents.length = 0;
-    expect(client.getSnapshot().calendarEvents).toHaveLength(1);
+
+    const read = providers.read();
+    read.calendarEvents.length = 0;
+    expect(providers.read().calendarEvents).toHaveLength(1);
+
+    stop();
+    await createEvent(ctx(), { ...meeting, idempotencyKey: 'n2' });
+    expect(listener).toHaveBeenCalledTimes(1);
   });
 });

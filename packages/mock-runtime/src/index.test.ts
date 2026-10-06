@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createMockClient } from './index.ts';
-import type { OneClient } from '../../contracts/src/index.ts';
+import type { ConversationRuntime } from '../../contracts/src/index.ts';
 
-let client: OneClient;
+let client: ConversationRuntime;
 afterEach(() => {
   client?.dispose();
   vi.useRealTimers();

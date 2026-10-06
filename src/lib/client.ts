@@ -1,4 +1,4 @@
-import type { OneClient } from '../../packages/contracts/src/index.ts';
+import type { ConversationRuntime } from '../../packages/contracts/src/index.ts';
 import { createMockClient } from '../../packages/mock-runtime/src/index';
 import { createCore } from '../../core/src/core';
 import { createCoreClient, EMPTY_SNAPSHOT } from './core-link';
@@ -25,11 +25,15 @@ import { WIRE_VERSION } from '../../packages/contracts/src/wire';
  */
 
 /** 由 startClient 在任何视图挂载之前写入；视图只读这两个绑定。 */
-export let client: OneClient = placeholderClient();
+export let client: ConversationRuntime = placeholderClient();
 export let link: CoreClient = placeholderLink();
 export let identity: ClientIdentity | null = null;
 
-function placeholderClient(): OneClient {
+/**
+ * 占位实现。领域能力（日历、笔记）**不在这里**：它们经本体调用提供方端口，
+ * 不经过前端持有的会话运行时（ADR-016）。
+ */
+function placeholderClient(): ConversationRuntime {
   const unavailable = () => {
     throw new Error('客户端还没接上 ONE 本体');
   };
@@ -40,14 +44,6 @@ function placeholderClient(): OneClient {
     changeAgent: async () => undefined,
     sendMessage: unavailable,
     cancelRun: async () => undefined,
-    calendarList: async () => ({ items: [] }),
-    calendarCreate: unavailable,
-    calendarUpdate: unavailable,
-    calendarDelete: unavailable,
-    notesList: async () => ({ items: [] }),
-    notesCreate: unavailable,
-    notesUpdate: unavailable,
-    notesDelete: unavailable,
     dispose: () => undefined,
   };
 }
@@ -58,6 +54,21 @@ function placeholderLink(): CoreClient {
   };
   return {
     client: placeholderClient(),
+    // 领域调用在本体没接上时同样要拒绝，不能返回空列表冒充「今天没有日程」。
+    domains: {
+      calendar: {
+        list: noLink,
+        create: noLink,
+        update: noLink,
+        remove: noLink,
+      },
+      notes: {
+        list: noLink,
+        create: noLink,
+        update: noLink,
+        remove: noLink,
+      },
+    },
     state: () => 'connecting',
     connection: () => null,
     subscribe: () => () => undefined,
