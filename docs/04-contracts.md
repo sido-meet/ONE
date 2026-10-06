@@ -1,0 +1,90 @@
+# 数据模型与接口契约
+
+## 命名与范围
+
+统一用 Conversation 表示用户的一条对话；Session 只在泛称或外部 externalSessionId 中使用。Workspace 是环境与数据归属，Run 是某个 Agent 的一次执行，AgentBinding 是对话与外部 Agent 会话的映射。
+
+当前可编译类型位于 `packages/contracts/src/index.ts`。该文件仅实现聊天切片；下列日历、笔记、权限和存储定义是下一阶段的设计，不代表已有 API。
+
+```mermaid
+erDiagram
+  Workspace ||--o{ Conversation : contains
+  Conversation ||--o{ Run : executes
+  Conversation ||--o{ AgentBinding : maps
+  Conversation ||--o{ DurableEvent : records
+  Workspace ||--o{ Note : owns
+  Workspace ||--o{ CalendarEvent : owns
+  Run ||--o{ ToolCall : invokes
+  Run ||--o{ Artifact : produces
+```
+
+## 核心对象
+
+| 对象                  | 必要字段                                                                           | 约束                                       |
+| --------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------ |
+| Workspace             | id, name, rootUri?                                                                 | 个人空间可以没有文件目录；文件访问另需授权 |
+| Conversation          | id, workspaceId, title, agentId, createdAt                                         | 不随 Agent 切换而改变 id                   |
+| Run                   | id, conversationId, agentId, status                                                | agentId 在运行期间不可变                   |
+| AgentBinding          | id, conversationId, agentId, externalSessionId?, lastProjectedSeq                  | provider/session 版本与有效性探测后续增加  |
+| DurableEvent          | id, schemaVersion, conversationId, seq, createdAt, type, payload                   | seq 在对话内唯一递增，类型可判别           |
+| Note（计划）          | id, workspaceId, title, body, version, sourceConversationId?, createdAt, updatedAt | 乐观锁冲突不覆盖                           |
+| CalendarEvent（计划） | id, workspaceId, title, startsAt, endsAt, timeZone, version, sourceConversationId? | endsAt > startsAt；时区用 IANA 名称        |
+| Artifact（计划）      | id, runId, uri, mimeType, digest, createdAt                                        | 内容存在受控文件目录，引用校验与权限检查   |
+| ToolCall（计划）      | id, runId, name, args, idempotencyKey, status, result?                             | 敏感参数脱敏；实际效果必须可审计           |
+
+消息和 Agent 切换目前位于事件的判别联合中，并非通用 `payload: any`。日期以带偏移的 RFC3339/ISO 时间存储；显示按用户时区转换。全天日程以后用单独的日期字段，避免强行按午夜 UTC 表示。
+
+## 已实现 OneClient
+
+| 方法               | 输入 / 输出                    | 语义                                   |
+| ------------------ | ------------------------------ | -------------------------------------- |
+| getSnapshot        | → Snapshot                     | 同步返回副本，调用方修改不影响内部状态 |
+| subscribe          | callback → unsubscribe         | 订阅快照变化，第一次由调用方读取       |
+| createConversation | title? → Conversation          | 个人空间创建，默认 Chat Agent          |
+| changeAgent        | conversationId, agentId → void | 运行中 BUSY，同 Agent 为无操作         |
+| sendMessage        | conversationId, text → Run     | 先提交用户消息与启动事件，再模拟回复   |
+| cancelRun          | runId → void                   | 已结束则无操作；未知 Run 为 NOT_FOUND  |
+| dispose            | → void                         | 释放计时器与订阅，调用方不再使用该实例 |
+
+错误类 ClientError 有 VALIDATION、NOT_FOUND、BUSY、DISPOSED。真实适配层以后补 PERMISSION_DENIED、UNAVAILABLE、TIMEOUT、CONFLICT、RATE_LIMITED、INTERNAL。错误包含可展示文案，日志不要输出密钥。
+
+**接口演进约束**：当前 getSnapshot 同步是 UI 本地缓存接口。未来 IPC Client 要先异步握手加载缓存，再进入 ready；网络请求不得伪装成同步读取。扩展 `connect()/connectionState` 时一起更新 Mock 和契约测试，不承诺完全无需改 UI。
+
+## 下一步领域命令草案
+
+统一命令信封：`{ requestId, workspaceId, source: 'ui' | 'agent', runId?, expectedVersion?, input }`。修改命令接受 idempotencyKey；命令来源在可信边界标记，不相信客户端自报权限。
+
+| 命令            | 核心输入                                           | 输出 / 校验                       |
+| --------------- | -------------------------------------------------- | --------------------------------- |
+| calendar.list   | rangeStart, rangeEnd, timeZone                     | 范围内条目，分页游标              |
+| calendar.create | title, startsAt, endsAt, timeZone, idempotencyKey  | CalendarEvent；时间有效、时长为正 |
+| calendar.update | id, expectedVersion, patch, idempotencyKey         | 新版本；冲突返回 CONFLICT         |
+| calendar.delete | id, expectedVersion, idempotencyKey                | 删除结果与审计引用                |
+| notes.list      | query?, cursor?, limit                             | 摘要列表，不默认加载全部正文      |
+| notes.create    | title, body, sourceConversationId?, idempotencyKey | Note                              |
+| notes.update    | id, expectedVersion, patch, idempotencyKey         | Note 新版本                       |
+| notes.delete    | id, expectedVersion, idempotencyKey                | 删除结果                          |
+
+P03 把此草案写成 TypeScript 类型和运行时校验 schema。TypeScript 只负责编译期，IPC/MCP 输入必须在入口做运行时校验。UI 与 MCP 都调用同一领域方法，时间校验和幂等规则不能复制两套。
+
+## 事件与 Run 状态
+
+当前 durable：message.created、agent.changed、run.started、run.finished。当前 token 增量体现在 Snapshot.drafts；EphemeralEvent 类型预留，尚未提供独立事件订阅接口。
+
+后续 durable：tool.requested、permission.resolved、tool.completed/failed、artifact.created、conversation.summarized。后续 ephemeral：message.delta、progress、typing、stdout.delta（有缓冲上限）。不收集隐藏 chain-of-thought。
+
+目标 Run：queued → running ↔ awaiting_permission → completed / cancelled / failed / interrupted。当前 Mock 只用 running/completed/cancelled；failed 类型保留待故障模拟。终态不能回到 running；重试创建新 Run，并用 retryOf 关联旧 Run。
+
+## 持久化计划（0.2）
+
+SQLite 表：workspaces、conversations、runs、agent_bindings、conversation_events、notes、calendar_events、artifacts、command_receipts、schema_migrations。
+
+- conversation_events 唯一索引 `(conversation_id, seq)`；外键开启；同事务写投影与事件。
+- command_receipts 唯一 `(workspace_id, idempotency_key)`，保存请求摘要与结果；同键不同请求拒绝。
+- 笔记和日程用 version 做并发控制；runs 加 status 与更新时间索引。
+- 不在大历史中重复存二进制文件；附件放应用数据目录，用摘要关联。
+- 数据位置由平台 appDataDir 获取，不写代码仓库；迁移前备份、失败回滚。
+- v1 导出 JSON 带 schemaVersion 和相对附件路径；导入校验大小、路径穿越和未知字段。
+- 自动摘要不覆盖原消息；记录生成范围与来源 seq。用户可纠正摘要。
+
+这里是数据设计，尚未创建数据库或迁移脚本，R01 开发时需要从实际查询和恢复用例形成可执行 schema。

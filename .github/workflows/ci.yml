@@ -1,0 +1,15 @@
+name: Frontend verification
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --global pnpm@11.18.0
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify
