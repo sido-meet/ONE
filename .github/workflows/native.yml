@@ -1,0 +1,20 @@
+name: Native shell check
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  shell:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --global pnpm@11.18.0
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - working-directory: src-tauri
+        run: cargo test
+      - working-directory: src-tauri
+        run: cargo check

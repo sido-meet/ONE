@@ -4,7 +4,7 @@
 
 ONE 是以对话为中心的个人 Agent 桌面环境：宠物作为入口，聊天作为主线，日历、笔记与其他能力围绕对话展开。
 
-当前版本 **0.0.1：规划与项目初始化**。已准备前端骨架、内存模拟会话、Tauri 主窗口配置和开发文档；不是完整的 0.1 产品。
+当前处于 **0.1 交互原型的第一轮**：桌面三窗口（主窗口 / 宠物 / 小聊天框）、跨窗口权威状态代理、日历与笔记领域契约已经就位。Claude Code、MCode 仍是模拟身份，日历笔记只有契约没有界面，全部数据仅在内存中。**不是完整的 0.1 产品，也没有发布过任何版本。**
 
 ## 先看哪里
 
@@ -38,28 +38,37 @@ pnpm dev
 ```powershell
 pnpm verify         # 类型、行为测试、构建、格式
 pnpm env:check      # 环境检查
-pnpm desktop:dev    # 需要先安装 Rust / Windows C++ 工具
+pnpm desktop:dev    # 桌面开发态：主窗口 + 宠物 + 小聊天框
+pnpm desktop:build  # 原生可执行程序（不生成安装包）
 ```
+
+浏览器打开 `http://127.0.0.1:1420` 时没有 Tauri 环境，只会显示主窗口并在本进程内运行模拟会话。
 
 ## 现在可以体验
 
-- 创建多个对话，分别发送消息。
-- 查看逐步出现的模拟回复，停止后保留已生成内容。
-- 回复结束后切换模拟 Agent，原对话与历史保留。
-- 从“项目起点”查看下一阶段方向。
+桌面模式（`pnpm desktop:dev`）：
 
-所有数据仅在内存中；刷新清空，不连接外部服务。Claude Code、MCode 是交互占位，不代表已经接入。桌面宠物、小聊天框、日历、笔记是下一阶段任务。
+- 主窗口创建对话、发送消息、看逐步出现的模拟回复、停止、切换 Agent。
+- 桌面上出现 128×128 的几何宠物：单击打开小聊天框，右键弹出菜单（打开 ONE / 打开小聊天框 / 隐藏宠物 / 退出），底部拖拽条移动它。
+- 在小聊天框里发送消息，展开主窗口看到的是同一个对话、同一段历史、同一个 Run。
+- 主窗口侧栏可隐藏/恢复宠物、打开小聊天框；Esc 关闭小聊天框。
+
+只跑 `pnpm dev` 时可以体验主窗口的对话流程。
+
+所有数据仅在内存中；刷新或退出清空，不连接外部服务。Claude Code、MCode 是交互占位，不代表已经接入。日历与笔记已有契约和行为测试，但还没有界面（P04/P05）。DPI、多显示器与拖拽手感尚未实机验收。
 
 ## 目录
 
 ```text
 src/                       Svelte 界面与依赖装配入口
-packages/contracts/src/    OneClient、对象和事件类型
+src/windows/               MainWindow / BubbleWindow / PetWindow
+src/lib/                   装配点、窗口协议、权威状态代理与代理端
+packages/contracts/src/    OneClient、领域契约、输入校验、错误码
 packages/mock-runtime/src/  模拟实现与行为测试
-src-tauri/                 Rust/Tauri 最小桌面壳
+src-tauri/                 Rust/Tauri 桌面壳（窗口、菜单、定位算法）
 docs/                      开发依据和任务清单
 scripts/                   环境检查
-.github/workflows/         前端持续检查
+.github/workflows/         前端与 native 持续检查
 ```
 
 当前采用一个包管理入口，packages 先用于模块边界，尚不是独立发布的 workspace 包。真实 Runtime、插件 SDK 和数据库按里程碑创建。

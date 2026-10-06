@@ -1,9 +1,17 @@
 /**
- * Domain error codes. Real adapters still need PERMISSION_DENIED, UNAVAILABLE,
- * TIMEOUT and RATE_LIMITED (docs/04); 0.1 only models what the mock can hit.
+ * Domain error codes. PERMISSION_DENIED and RATE_LIMITED stay out until a real
+ * adapter can raise them; the rest are reachable from the 0.1 prototype,
+ * including the cross-window protocol (UNAVAILABLE / TIMEOUT / INTERNAL).
  */
 export type ErrorCode =
-  'NOT_FOUND' | 'BUSY' | 'VALIDATION' | 'DISPOSED' | 'CONFLICT';
+  | 'NOT_FOUND'
+  | 'BUSY'
+  | 'VALIDATION'
+  | 'DISPOSED'
+  | 'CONFLICT'
+  | 'UNAVAILABLE'
+  | 'TIMEOUT'
+  | 'INTERNAL';
 
 export class ClientError extends Error {
   constructor(

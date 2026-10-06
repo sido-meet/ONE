@@ -2,15 +2,17 @@
 
 ## 本机检查记录 · 2026-10-06
 
-| 项目                   | 检查结果                                      |
-| ---------------------- | --------------------------------------------- |
-| 系统/目录              | Windows，E:\Projects\ONE                      |
-| Node.js                | 22.23.1                                       |
-| npm / pnpm             | 10.9.8 / 11.18.0                              |
-| Git                    | 2.48.1.windows.1                              |
-| Rust / Cargo           | PATH 和默认 cargo/bin 下未找到                |
-| WebView2               | 注册表发现 Runtime 154.0.4258.53              |
-| Visual C++ Build Tools | Tauri CLI 未检测到包含 MSVC 和 SDK 的有效安装 |
+| 项目                   | 检查结果                                                                 |
+| ---------------------- | ------------------------------------------------------------------------ |
+| 系统/目录              | Windows，E:\Projects\ONE                                                 |
+| Node.js                | 22.23.1                                                                  |
+| npm / pnpm             | 10.9.8 / 11.18.0                                                         |
+| Git                    | 2.48.1.windows.1                                                         |
+| Rust / Cargo           | 1.99.0 / 1.99.0（rustup，host x86_64-pc-windows-msvc）                   |
+| WebView2               | 注册表发现 Runtime 154.0.4258.53                                         |
+| Visual C++ Build Tools | Build Tools 2022 17.14.41，含 MSVC 14.44.35207 与 Windows SDK 10.0.26100 |
+
+安装记录：`rustup-init.exe -y --default-toolchain stable`（官方入口 win.rustup.rs）；`winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --norestart --nocache --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"`。安装器提示需重启以完成安装；实测未重启即可编译，重启后建议再跑一次 `pnpm env:check`。
 
 ## 浏览器原型
 
@@ -41,9 +43,17 @@ pnpm desktop:dev
 pnpm desktop:build
 ```
 
-desktop:build 当前只构建可执行程序，不生成安装包。Tauri 标识 `dev.one.local` 为开发占位，bundle.active 为 false，尚无发布图标和签名。首次成功 native 构建后提交 src-tauri/Cargo.lock；当前没有 Rust 锁文件，native 依赖尚未锁定和实机验证。
+desktop:build 当前只构建可执行程序，不生成安装包。Tauri 标识 `dev.one.local` 为开发占位，bundle.active 为 false，尚无发布图标和签名。`src-tauri/Cargo.lock` 已在首次成功 native 构建后生成并提交，native 依赖版本已锁定。
 
-最小壳只创建 main 窗口，不包含宠物/托盘/热键插件。不要因为有配置就判定相关桌面功能完成。
+应用图标是脚本生成的占位标记（`src-tauri/icons/source.png` 为 1024×1024 源图，`pnpm exec tauri icon src-tauri/icons/source.png` 生成其余尺寸），不是品牌资产，发布前需替换并记录作者与授权。
+
+壳现在创建三个窗口：`main`（权威状态宿主）、`pet`（128×128 透明置顶）、`bubble`（400×560，初始隐藏）。窗口动作只能通过 `invoke` 调用壳命令，能力文件只开放事件收发。
+
+```powershell
+pnpm desktop:dev                # 启动 Vite + 桌面壳
+pnpm desktop:build              # 原生可执行程序（release）
+Set-Location src-tauri; cargo test   # 窗口定位等 Rust 单测
+```
 
 ## 常用命令
 
@@ -57,6 +67,7 @@ desktop:build 当前只构建可执行程序，不生成安装包。Tauri 标识
 | pnpm preview    | 本地查看生产产物                    |
 | pnpm format     | 统一格式                            |
 | pnpm verify     | 类型、测试、构建、格式完整检查      |
+| cargo test      | 壳层 Rust 单测（窗口定位算法）      |
 
 ## 开发习惯
 
@@ -66,7 +77,7 @@ desktop:build 当前只构建可执行程序，不生成安装包。Tauri 标识
 - 新增目录只在有实现时创建，不预造几十个空包。
 - .env 不提交；.env.example 只放字段说明。VITE_ 变量会进入前端，不能存模型密钥。
 - 浏览器演示数据刷新即丢；不要拿它保存真实资料。
-- 远程 CI 配置已准备，仅检查前端，推到远程后才会实际运行；native 构建工作流在 S01 之后补充。
+- 远程 CI 有两条：前端 `verify`，native 壳在 Windows runner 上跑 `cargo test` 与 `cargo check`。推送不等于本地验收通过。
 
 ## 常见故障
 

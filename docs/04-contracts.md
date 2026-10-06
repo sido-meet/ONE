@@ -4,7 +4,7 @@
 
 统一用 Conversation 表示用户的一条对话；Session 只在泛称或外部 externalSessionId 中使用。Workspace 是环境与数据归属，Run 是某个 Agent 的一次执行，AgentBinding 是对话与外部 Agent 会话的映射。
 
-当前可编译类型位于 `packages/contracts/src/index.ts`。该文件仅实现聊天切片；下列日历、笔记、权限和存储定义是下一阶段的设计，不代表已有 API。
+聊天类型位于 `packages/contracts/src/index.ts`，错误码在 `errors.ts`，日历与笔记契约及其运行时校验在 `domain.ts`。下列 Artifact、ToolCall、权限和存储定义仍是下一阶段的设计，不代表已有 API。
 
 ```mermaid
 erDiagram
@@ -20,17 +20,17 @@ erDiagram
 
 ## 核心对象
 
-| 对象                  | 必要字段                                                                           | 约束                                       |
-| --------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------ |
-| Workspace             | id, name, rootUri?                                                                 | 个人空间可以没有文件目录；文件访问另需授权 |
-| Conversation          | id, workspaceId, title, agentId, createdAt                                         | 不随 Agent 切换而改变 id                   |
-| Run                   | id, conversationId, agentId, status                                                | agentId 在运行期间不可变                   |
-| AgentBinding          | id, conversationId, agentId, externalSessionId?, lastProjectedSeq                  | provider/session 版本与有效性探测后续增加  |
-| DurableEvent          | id, schemaVersion, conversationId, seq, createdAt, type, payload                   | seq 在对话内唯一递增，类型可判别           |
-| Note（计划）          | id, workspaceId, title, body, version, sourceConversationId?, createdAt, updatedAt | 乐观锁冲突不覆盖                           |
-| CalendarEvent（计划） | id, workspaceId, title, startsAt, endsAt, timeZone, version, sourceConversationId? | endsAt > startsAt；时区用 IANA 名称        |
-| Artifact（计划）      | id, runId, uri, mimeType, digest, createdAt                                        | 内容存在受控文件目录，引用校验与权限检查   |
-| ToolCall（计划）      | id, runId, name, args, idempotencyKey, status, result?                             | 敏感参数脱敏；实际效果必须可审计           |
+| 对象                        | 必要字段                                                                           | 约束                                       |
+| --------------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------ |
+| Workspace                   | id, name, rootUri?                                                                 | 个人空间可以没有文件目录；文件访问另需授权 |
+| Conversation                | id, workspaceId, title, agentId, createdAt                                         | 不随 Agent 切换而改变 id                   |
+| Run                         | id, conversationId, agentId, status                                                | agentId 在运行期间不可变                   |
+| AgentBinding                | id, conversationId, agentId, externalSessionId?, lastProjectedSeq                  | provider/session 版本与有效性探测后续增加  |
+| DurableEvent                | id, schemaVersion, conversationId, seq, createdAt, type, payload                   | seq 在对话内唯一递增，类型可判别           |
+| Note（已实现类型）          | id, workspaceId, title, body, version, sourceConversationId?, createdAt, updatedAt | 乐观锁冲突不覆盖                           |
+| CalendarEvent（已实现类型） | id, workspaceId, title, startsAt, endsAt, timeZone, version, sourceConversationId? | endsAt > startsAt；时区用 IANA 名称        |
+| Artifact（计划）            | id, runId, uri, mimeType, digest, createdAt                                        | 内容存在受控文件目录，引用校验与权限检查   |
+| ToolCall（计划）            | id, runId, name, args, idempotencyKey, status, result?                             | 敏感参数脱敏；实际效果必须可审计           |
 
 消息和 Agent 切换目前位于事件的判别联合中，并非通用 `payload: any`。日期以带偏移的 RFC3339/ISO 时间存储；显示按用户时区转换。全天日程以后用单独的日期字段，避免强行按午夜 UTC 表示。
 
@@ -46,7 +46,9 @@ erDiagram
 | cancelRun          | runId → void                   | 已结束则无操作；未知 Run 为 NOT_FOUND  |
 | dispose            | → void                         | 释放计时器与订阅，调用方不再使用该实例 |
 
-错误类 ClientError 有 VALIDATION、NOT_FOUND、BUSY、DISPOSED。真实适配层以后补 PERMISSION_DENIED、UNAVAILABLE、TIMEOUT、CONFLICT、RATE_LIMITED、INTERNAL。错误包含可展示文案，日志不要输出密钥。
+日历与笔记命令已按 P03 落到 `OneClient`：calendarList/Create/Update/Delete、notesList/Create/Update/Delete，签名统一为 `(context: CommandContext, input: unknown)`。参数故意是 `unknown`——IPC 或 MCP 边界不能靠 TypeScript 挡住，每次调用都由 `domain.ts` 的解析函数校验后才触碰状态。未在白名单内的命令在 host 侧直接丢弃。
+
+错误类 ClientError 有 VALIDATION、NOT_FOUND、BUSY、DISPOSED、CONFLICT、UNAVAILABLE、TIMEOUT、INTERNAL。真实适配层以后补 PERMISSION_DENIED、RATE_LIMITED。CONFLICT 的 `details` 携带双方版本号，UI 据此保留两份草稿；错误包含可展示文案，日志不要输出密钥。
 
 **接口演进约束**：当前 getSnapshot 同步是 UI 本地缓存接口。未来 IPC Client 要先异步握手加载缓存，再进入 ready；网络请求不得伪装成同步读取。扩展 `connect()/connectionState` 时一起更新 Mock 和契约测试，不承诺完全无需改 UI。
 
@@ -66,6 +68,8 @@ erDiagram
 | notes.delete    | id, expectedVersion, idempotencyKey                | 删除结果                          |
 
 P03 把此草案写成 TypeScript 类型和运行时校验 schema。TypeScript 只负责编译期，IPC/MCP 输入必须在入口做运行时校验。UI 与 MCP 都调用同一领域方法，时间校验和幂等规则不能复制两套。
+
+已实现：输入 schema 拒绝未知字段、要求带偏移的 RFC3339 时间、校验 IANA 时区与正时长；幂等以 `(workspaceId, idempotencyKey)` 为键保存请求摘要与结果，同键同输入回放原结果、同键异输入报 CONFLICT。笔记列表只返回摘要，正文不默认加载。删除返回 `auditRef`，0.1 的审计条目仅存在内存中。
 
 ## 事件与 Run 状态
 

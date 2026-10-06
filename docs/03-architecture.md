@@ -2,7 +2,7 @@
 
 ## 本次落地与长期方向
 
-当前落地：Svelte 5 + TypeScript + Vite；OneClient 与内存 MockRuntime；Tauri v2 最小主窗口配置。无业务后端、数据库、真实模型或插件加载器。
+当前落地：Svelte 5 + TypeScript + Vite；OneClient 与内存 MockRuntime；Tauri v2 的 main / pet / bubble 三窗口；main 窗口内的薄状态代理。无业务后端、数据库、真实模型或插件加载器。
 
 目标方向：Rust/Tauri 负责原生窗口与可信系统能力，TypeScript Runtime 负责会话、运行、上下文投影和能力编排。采用本地单体加受控外部进程，不做微服务。
 
@@ -25,6 +25,12 @@ flowchart TB
 ## 进程与部署决策
 
 0.1 单窗口浏览器原型在同一 JS 进程使用内存 MockClient。Tauri 多窗口阶段引入薄 NativeHost 状态代理：主 WebView 保持隐藏存活并持有 MockClient，其他窗口发带 requestId 的命令给主窗口，由主窗口广播带 revision 的快照。新增窗口先请求快照；旧 revision 丢弃；主窗口失效则显示“原型服务不可用”。窗口 ID 和命令白名单由可信壳核验。这是仅供 0.1 的过渡方案，不能直接用于真实 Agent。
+
+**已实现的 0.1 形态**（`src/lib/`）：`client.ts` 是唯一装配点，按窗口标签选择角色——main 窗口持有唯一的 MockClient 并包成 `host.ts`，pet/bubble 得到 `proxy-client.ts`。协议见 `protocol.ts`：命令名白名单、`requestId` 回执、带 `revision` 的快照广播、陈旧 revision 丢弃、8 秒请求超时后标记 `unavailable`，`transport.ts` 让这套逻辑可在无桌面环境单测。与最初设想的差别有三点，均为已知取舍：
+
+- main 窗口同时可见并持有权威状态，而不是"隐藏存活"。宠物与小窗都依赖它，用户看得见反而更容易理解状态归属。
+- 窗口操作不经过 JS window API，而是 `invoke` 到 Rust 壳（`tauri.ts` → `main.rs`），由壳决定窗口能做什么。命令名白名单在 host 侧执行，但发送方标签无法在 v2 事件里回溯，因此"身份核验"目前只到命令名层面；出现不可信窗口或插件前必须补齐。
+- 每次 token 增量都广播整份快照，这是原型代价；0.2 换sidecar 时必须改成有长度边界的增量帧。
 
 0.2 之后权威状态移入唯一 Runtime sidecar。Rust 启动、监控和终止该进程；用有长度边界的 JSON 消息或逐行 JSON 协议经 stdio 通信，协议日志只走 stderr。要求 requestId、协议版本、超时、帧大小上限、取消与启动握手；不默认暴露本地 HTTP 监听端口。
 

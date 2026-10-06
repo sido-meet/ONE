@@ -1,13 +1,17 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { AgentId } from '../packages/contracts/src';
-  import { client } from './lib/client';
+  import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+  import type { AgentId } from '../../packages/contracts/src';
+  import { client, windowLabel } from '../lib/client';
+  import { shell } from '../lib/tauri';
+  import { HOST_BEFORE_QUIT } from '../lib/protocol';
 
   let snapshot = $state(client.getSnapshot());
   let selectedId = $state('welcome');
   let page = $state<'chat' | 'plan'>('chat');
   let input = $state('');
   let error = $state('');
+  let petVisible = $state(true);
   const agents: { id: AgentId; name: string }[] = [
     { id: 'chat', name: 'Chat Agent' },
     { id: 'claude-code', name: 'Claude Code' },
@@ -31,6 +35,38 @@
       snapshot = client.getSnapshot();
     }),
   );
+  /**
+   * Quitting stops what is running before the process goes away. The shell falls
+   * back to a forced exit if this window cannot answer, so it never hangs.
+   */
+  onMount(() => {
+    if (windowLabel !== 'main') return;
+    const stopRunningWork = async () => {
+      const running = client
+        .getSnapshot()
+        .runs.filter((run) => run.status === 'running');
+      await Promise.all(running.map((run) => client.cancelRun(run.id)));
+    };
+    const beforeQuit = getCurrentWebviewWindow().listen(
+      HOST_BEFORE_QUIT,
+      () => {
+        void (async () => {
+          await stopRunningWork();
+          await shell.forceQuit();
+        })();
+      },
+    );
+    const closeRequested = getCurrentWebviewWindow().onCloseRequested(
+      (event) => {
+        event.preventDefault();
+        void shell.quit();
+      },
+    );
+    return () => {
+      void beforeQuit.then((stop) => stop());
+      void closeRequested.then((stop) => stop());
+    };
+  });
   async function act(action: () => Promise<unknown>) {
     error = '';
     try {
@@ -91,6 +127,28 @@
           page = 'plan';
         }}>◈ <span>项目起点</span><span class="arrow">↗</span></button
       >
+      <div class="pet-tools">
+        <p class="section-label">桌面入口</p>
+        <button
+          onclick={() =>
+            act(async () => {
+              await shell.openBubble();
+            })}>打开小聊天框</button
+        >
+        {#if petVisible}<button
+            onclick={() =>
+              act(async () => {
+                await shell.hidePet();
+                petVisible = false;
+              })}>隐藏宠物</button
+          >{:else}<button
+            onclick={() =>
+              act(async () => {
+                await shell.showPet();
+                petVisible = true;
+              })}>显示宠物</button
+          >{/if}
+      </div>
       <p>一个对话，持续生长。</p>
     </div>
   </aside>
