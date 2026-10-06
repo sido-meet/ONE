@@ -57,6 +57,12 @@ export interface ClientIdentity {
    * 页面会安静地什么都不显示（ADR-018）。
    */
   pluginPageBase: string;
+  /**
+   * 摘要条现在是展开还是收起。**由窗口高度决定**，界面照着它初始化 ——
+   * 高度是壳唯一说了算的东西，界面不再自己记一份（实机踩到：壳把窗口撑高了，
+   * 界面却还画着收起的样子，看起来就像「展开失效了」）。
+   */
+  summaryExpanded: boolean;
 }
 
 export function inTauri(): boolean {
@@ -82,6 +88,9 @@ export const shell = {
   openPluginPage: (provider: string) =>
     invoke('open_plugin_page', { provider }),
   closePluginWindow: () => invoke('close_plugin_window'),
+  /** 展开/收起摘要面板。窗口高度只有壳知道怎么改，界面只说意图。 */
+  resizeSummary: (expanded: boolean) => invoke('resize_summary', { expanded }),
+  hideSummary: () => invoke('hide_summary'),
   quit: () => invoke('quit_app'),
   /** Called by the shell after the view stopped what was running. */
   forceQuit: () => invoke('force_quit'),
@@ -192,6 +201,7 @@ export async function clientIdentity(): Promise<ClientIdentity> {
       // 浏览器预览里没有插件协议的宿主方，插件页面在预览里打不开，如实说没有。
       pluginProvider: null,
       pluginPageBase: 'one-plugin://localhost',
+      summaryExpanded: false,
     };
   }
   const value = await invoke<unknown>('client_identity');
@@ -215,6 +225,7 @@ export async function clientIdentity(): Promise<ClientIdentity> {
       typeof record.pluginPageBase === 'string'
         ? record.pluginPageBase
         : 'one-plugin://localhost',
+    summaryExpanded: record.summaryExpanded === true,
   };
 }
 

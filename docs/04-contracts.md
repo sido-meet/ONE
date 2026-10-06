@@ -88,6 +88,23 @@ erDiagram
 
 协议本身随 wire v3 走：参与者在 `hello.client.view` 里申报入口，宿主用 `page.read` 向本体要资源。**为什么升版本而不是加个可选字段**：v2 的本体会静默丢掉这个字段，于是页面永远打不开而没有任何一方报错 —— 那正是版本守卫要挡住的情况。
 
+## 已实现：摘要条契约（ADR-019）
+
+摘要条**不新增任何协议**。它只用三样已存在的东西，这是有意的 —— 四态与在场判断本来就该由本体和名册表达，界面自己发明一套只会多一处能说谎的地方。
+
+| 用到的                           | 从哪来                                         | 摘要条拿它做什么               |
+| -------------------------------- | ---------------------------------------------- | ------------------------------ |
+| `call` 命令帧                    | `calendarList` / `notesList`（已有白名单命令） | 经本体取数，不自己连提供方     |
+| `details.providerProblem.reason` | 领域调用失败时的结构化原因（已有）             | 四态分流，不解析中文字符串     |
+| `roster.connected[].view`        | 名册里自带页面的申报（v3 已有）                | 判定「打开××页面」按钮能不能点 |
+| `state.revision`                 | 本体每帧状态带的版本号（已有）                 | 摘要底下写「本体状态 #7」      |
+
+`CoreClient.revision()` 是新增的**读取口**（没收到过状态帧时是 `-1`，不是 `0`）。`client_identity.summaryExpanded` 也是新增的**询问**：展开与否由窗口高度决定，高度只有壳知道，界面不自己记一份。
+
+**摘要条是只读窗口但会发命令**：`windowRole: 'view'`，不握手、走 `core_replay` 拿状态与名册，取数仍走正常的 `call` 帧。`core_replay` 只重放 `welcome` / `state` / `roster` 三帧，命令回执绝不重放。
+
+**工作区键与插件页面共用**（`summaryCommandContext` 与 `pageCommandContext` 都退回 `personal`）：同一个键，否则同一条日程会在命令行、插件页面、摘要条三处各存一份。
+
 ## 下一步领域命令草案
 
 统一命令信封：`{ requestId, workspaceId, source: 'ui' | 'agent', runId?, expectedVersion?, input }`。修改命令接受 idempotencyKey；命令来源在可信边界标记，不相信客户端自报权限。

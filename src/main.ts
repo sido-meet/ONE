@@ -3,6 +3,7 @@ import MainWindow from './windows/MainWindow.svelte';
 import PetWindow from './windows/PetWindow.svelte';
 import BubbleWindow from './windows/BubbleWindow.svelte';
 import PluginWindow from './windows/PluginWindow.svelte';
+import SummaryWindow from './windows/SummaryWindow.svelte';
 import { startClient } from './lib/client';
 import './app.css';
 
@@ -35,7 +36,9 @@ void startClient()
         ? PetWindow
         : self.window === 'bubble'
           ? BubbleWindow
-          : MainWindow;
+          : self.window === 'summary'
+            ? SummaryWindow
+            : MainWindow;
     const target = document.getElementById('app');
     if (!target) throw new Error('Missing app root');
     mount(View, { target });

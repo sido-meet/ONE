@@ -75,6 +75,7 @@ function placeholderLink(): CoreClient {
     subscribe: () => () => undefined,
     roster: () => ({ installed: [], connected: [] }),
     snapshot: () => EMPTY_SNAPSHOT,
+    revision: () => -1,
     refusal: () => '',
     problem: () => '客户端还没接上 ONE 本体',
     listClients: noLink,

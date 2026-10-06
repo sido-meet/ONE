@@ -80,6 +80,28 @@ one: 本体已处理 shell-1：{"content":"<!doctype html>…"}
 
 少了第一行，问题在 WebView 侧（地址前缀或 CSP）；少了第三行，问题在提供方那边。抓窗口内容用 `.one/capture-window.ps1`（`PrintWindow` 直接抓窗口客户区，屏幕上被游戏挡住也拍得到）。
 
+## 调试摘要条
+
+```powershell
+$env:ONE_REPO_ROOT = "E:\Projects\ONE"
+src-tauri\target\release\one-desktop.exe --client=pet --open-summary --expand-summary
+```
+
+`--open-summary` 启动即亮出摘要条，`--expand-summary` 直接展开（360×96 → 360×420）。
+
+**为什么需要这两个参数**：桌面上有置顶程序时合成点击打不到宠物窗口，而无边框置顶窗口在 Windows 上还常常拿不到键盘焦点（Tab / Enter 同样进不去）。摘要条的收起/刷新按钮因此**无法用合成输入驱动**，验收只能走启动参数。`--expand-summary` 顺带证明高度那条路是通的（窗口真的变成 420 高），从而把「输入没送达」与「命令没实现」分开。
+
+**一次只开一个 `one-desktop`。** 同一根管道只有一次握手，第二个实例成了孤儿，它发的命令永远没人应答，回的是 `INTERNAL` 的「目标客户端处理失败」—— 那句话会把「插件不在场」说成「本体坏了」。验收要串行。
+
+摘要条是只读窗口（`windowRole: 'view'`），靠 `core_replay` 拿状态与名册，**但它仍然发命令**（`calendarList` / `notesList`），因此它能不能取到数完全取决于本体在不在。抓它用：
+
+```powershell
+pwsh -NoProfile -File .one\capture-window.ps1 -Out "E:\Projects\ONE\.one\summary.png"
+pwsh -NoProfile -File .one\list-windows.ps1        # 列出窗口位置尺寸到文件
+```
+
+`.one` 下的验收脚本一律**写文件不打印**：PowerShell 捕获子进程输出会按 GBK 解释 UTF-8 字节，中文全变乱码，那不是程序的错。读文件用 read 工具。
+
 ## 改管道代码前必读
 
 壳与本体之间是 Windows 命名管道。写入句柄由 `File::try_clone()` 得到，而 Windows 上 `try_clone` 走 `DuplicateHandle`：两个句柄指向同一个文件对象，同步 I/O 在文件对象上串行化。**只要读取线程停在 `ReadFile` 里等数据，写端就永远发不出去** —— 而本体在收到第一帧之前不会主动说话，所以握手会静默卡死，症状是"名册里没有这个客户端，但管道明明连上了"。现在的读端用 `PeekNamedPipe` 轮询，没有数据就让出文件对象（`src-tauri/src/core_link.rs`）。改这块之前先读那里的注释。

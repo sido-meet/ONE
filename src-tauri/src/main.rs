@@ -14,9 +14,14 @@ use tauri::{
 
 const PET: &str = "pet";
 const BUBBLE: &str = "bubble";
+const SUMMARY: &str = "summary";
 const MAIN: &str = "main";
 const BEFORE_QUIT: &str = "one:before-quit";
 const GAP: i32 = 12;
+/// 摘要条收起来时的高度。展开时是 EXPANDED_HEIGHT，面板自己排版。
+const SUMMARY_COLLAPSED_HEIGHT: f64 = 96.0;
+const SUMMARY_EXPANDED_HEIGHT: f64 = 420.0;
+const SUMMARY_WIDTH: f64 = 360.0;
 /// Menu item ids. A menu entry without a handler is a button that silently does
 /// nothing, so the ids are constants and `menu_action` has to answer for all of
 /// them (see the test of the same name).
@@ -24,6 +29,7 @@ const LAUNCH_DESKTOP: &str = "launch_desktop";
 const LAUNCH_PET: &str = "launch_pet";
 const RESTART_CORE: &str = "restart_core";
 const PET_BUBBLE: &str = "pet_bubble";
+const PET_SUMMARY: &str = "pet_summary";
 const PET_SHOW: &str = "pet_show";
 const QUIT: &str = "quit";
 /// 插件页面菜单项的前缀，后面紧跟寻址键。菜单是每次右键现搭的，所以这些 id
@@ -39,6 +45,7 @@ enum MenuAction {
     RestartCore,
     PetCapability(&'static str),
     OpenPlugin(String),
+    OpenSummary,
     Quit,
 }
 
@@ -51,6 +58,7 @@ fn menu_action(id: &str) -> Option<MenuAction> {
         LAUNCH_PET => MenuAction::Launch("pet"),
         RESTART_CORE => MenuAction::RestartCore,
         PET_BUBBLE => MenuAction::PetCapability(CAP_BUBBLE_OPEN),
+        PET_SUMMARY => MenuAction::OpenSummary,
         PET_SHOW => MenuAction::PetCapability(CAP_WINDOW_SHOW),
         QUIT => MenuAction::Quit,
         _ => return None,
@@ -159,27 +167,98 @@ fn clamp(value: i32, min: i32, max: i32) -> i32 {
     value.max(min).min(max)
 }
 
+/// 附属窗口落在宠物的哪一侧。两者不是随手定的：对话条是被叫出来才出现的，
+/// 贴着宠物下方最不挡事；摘要条是常驻的「今天有什么」，压在宠物上面才不会被
+/// 宠物本体挡住，而宠物在屏幕角落时上面往往更空。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Below,
+    Above,
+}
+
+/// 把一个附属窗口摆到宠物旁边：先落在偏好的一侧，放不下就翻到另一侧，
+/// 两边都放不下才夹回工作区里。水平方向永远居中于宠物。
+///
+/// 这条规则是 D06 布局仲裁的共同底座：四个窗口共用它，才不会出现「对话条会
+/// 翻面而摘要条不会」这种各写一份、慢慢走偏的情况。
+fn place_beside(
+    pet: Rect,
+    target: Rect,
+    work: Rect,
+    gap: i32,
+    prefer: Side,
+) -> (i32, i32) {
+    let x = clamp(
+        pet.x + pet.width / 2 - target.width / 2,
+        work.x,
+        work.x + work.width - target.width,
+    );
+    let near = pet.y + pet.height + gap;
+    let far = pet.y - target.height - gap;
+    let (first, second) = match prefer {
+        Side::Below => (near, far),
+        Side::Above => (far, near),
+    };
+    let fits_first = match prefer {
+        Side::Below => first <= work.y + work.height - target.height,
+        Side::Above => first >= work.y,
+    };
+    let fits_second = match prefer {
+        Side::Below => second >= work.y,
+        Side::Above => second <= work.y + work.height - target.height,
+    };
+    let y = if fits_first {
+        first
+    } else if fits_second {
+        second
+    } else {
+        // 两侧都放不下（工作区比窗口还矮）：夹进去，别让它跑到屏幕外。
+        clamp(first, work.y, work.y + work.height - target.height)
+    };
+    (x, y)
+}
+
 /// Puts the bubble under the pet, flipping above when the bottom edge would
 /// leave the monitor work area, and always keeps it inside that work area so it
 /// never lands off-screen at high DPI, on a second display, or on negative
 /// coordinates.
 fn place_bubble(pet: Rect, bubble: Rect, work: Rect, gap: i32) -> (i32, i32) {
-    let x = clamp(
-        pet.x + pet.width / 2 - bubble.width / 2,
-        work.x,
-        work.x + work.width - bubble.width,
-    );
-    let below = pet.y + pet.height + gap;
-    let above = pet.y - bubble.height - gap;
-    let bottom_limit = work.y + work.height - bubble.height;
-    let y = if below <= bottom_limit {
-        below
-    } else if above >= work.y {
-        above
-    } else {
-        clamp(below, work.y, bottom_limit)
-    };
-    (x, y)
+    place_beside(pet, bubble, work, gap, Side::Below)
+}
+
+/// 宠物所在显示器的可用区。拿不到就退回宠物自己那块：宁可摆在宠物旁边，
+/// 也不要因为查不到工作区而停在 (0,0) 压住任务栏。
+fn work_area_of(app: &AppHandle, pet: &WebviewWindow, pet_rect: Rect) -> Rect {
+    pet.current_monitor()
+        .ok()
+        .flatten()
+        .or(app.primary_monitor().ok().flatten())
+        .map(|monitor| {
+            let area = monitor.work_area();
+            Rect {
+                x: area.position.x,
+                y: area.position.y,
+                width: area.size.width as i32,
+                height: area.size.height as i32,
+            }
+        })
+        .unwrap_or(Rect {
+            x: pet_rect.x,
+            y: pet_rect.y,
+            width: pet_rect.width,
+            height: pet_rect.height,
+        })
+}
+
+fn outer_rect(window: &WebviewWindow) -> Option<Rect> {
+    let position = window.outer_position().ok()?;
+    let size = window.outer_size().ok()?;
+    Some(Rect {
+        x: position.x,
+        y: position.y,
+        width: size.width as i32,
+        height: size.height as i32,
+    })
 }
 
 fn show_bubble(app: &AppHandle) -> Result<(), String> {
@@ -188,40 +267,11 @@ fn show_bubble(app: &AppHandle) -> Result<(), String> {
         .ok_or("bubble window is missing")?;
     bubble.show().map_err(|error| error.to_string())?;
     if let Some(pet) = app.get_webview_window(PET) {
-        let pet_rect = pet.outer_position().ok().and_then(|position| {
-            pet.outer_size().ok().map(|size| Rect {
-                x: position.x,
-                y: position.y,
-                width: size.width as i32,
-                height: size.height as i32,
-            })
-        });
-        let bubble_size = bubble
-            .outer_size()
-            .ok()
-            .map(|size| (size.width as i32, size.height as i32));
-        if let (Some(pet_rect), Some((width, height))) = (pet_rect, bubble_size) {
+        if let (Some(pet_rect), Some((width, height))) = (
+            outer_rect(&pet),
+            bubble.outer_size().ok().map(|size| (size.width as i32, size.height as i32)),
+        ) {
             if width > 0 && height > 0 {
-                let work = pet
-                    .current_monitor()
-                    .ok()
-                    .flatten()
-                    .or(app.primary_monitor().ok().flatten())
-                    .map(|monitor| {
-                        let area = monitor.work_area();
-                        Rect {
-                            x: area.position.x,
-                            y: area.position.y,
-                            width: area.size.width as i32,
-                            height: area.size.height as i32,
-                        }
-                    })
-                    .unwrap_or(Rect {
-                        x: pet_rect.x,
-                        y: pet_rect.y,
-                        width: pet_rect.width,
-                        height: pet_rect.height,
-                    });
                 let (x, y) = place_bubble(
                     pet_rect,
                     Rect {
@@ -230,7 +280,7 @@ fn show_bubble(app: &AppHandle) -> Result<(), String> {
                         width,
                         height,
                     },
-                    work,
+                    work_area_of(app, &pet, pet_rect),
                     GAP,
                 );
                 bubble
@@ -240,6 +290,36 @@ fn show_bubble(app: &AppHandle) -> Result<(), String> {
         }
     }
     bubble.set_focus().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// 摘要条默认落在宠物上方；上方放不下（比如宠物贴着屏幕顶端）就翻到下方。
+/// 焦点不抢：摘要是常驻的，一弹出来就把焦点抢走会让正在输入的对话条失手。
+fn show_summary(app: &AppHandle) -> Result<(), String> {
+    let summary = app
+        .get_webview_window(SUMMARY)
+        .ok_or("summary window is missing")?;
+    summary.show().map_err(|error| error.to_string())?;
+    if let Some(pet) = app.get_webview_window(PET) {
+        if let (Some(pet_rect), Some(size)) = (outer_rect(&pet), summary.outer_size().ok())
+        {
+            let (x, y) = place_beside(
+                pet_rect,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: size.width as i32,
+                    height: size.height as i32,
+                },
+                work_area_of(app, &pet, pet_rect),
+                GAP,
+                Side::Above,
+            );
+            summary
+                .set_position(PhysicalPosition::new(x, y))
+                .map_err(|error| error.to_string())?;
+        }
+    }
     Ok(())
 }
 
@@ -276,6 +356,50 @@ fn hide_bubble(app: AppHandle) -> Result<(), String> {
             eprintln!("one: hide_bubble failed: {error}");
             error.to_string()
         })
+}
+
+#[tauri::command]
+fn open_summary(app: AppHandle) -> Result<(), String> {
+    show_summary(&app).inspect_err(|error| eprintln!("one: open_summary failed: {error}"))
+}
+
+#[tauri::command]
+fn hide_summary(app: AppHandle) -> Result<(), String> {
+    app.get_webview_window(SUMMARY)
+        .ok_or("summary window is missing")?
+        .hide()
+        .map_err(|error| error.to_string())
+}
+
+/// 摘要条是展开还是收起。**由窗口高度回答**，不另存一份状态：高度是壳唯一
+/// 说了算的东西，界面照着它初始化，两边就不会各记一份然后慢慢走偏
+/// （D05 实机踩到：壳按参数把窗口撑高了，界面却还画着收起的样子）。
+fn summary_is_expanded(app: &AppHandle) -> bool {
+    app.get_webview_window(SUMMARY)
+        .and_then(|window| window.outer_size().ok())
+        .map(|size| size.height as f64 > SUMMARY_COLLAPSED_HEIGHT)
+        .unwrap_or(false)
+}
+
+/// 展开与收起改的是**窗口高度**，不是界面里的一个类。窗口不够高，面板会被裁掉
+/// 一半 —— 而被裁掉的那一半正好是数据，看起来就像「数据丢了」。改完高度要重新
+/// 摆一次位置：贴在宠物上方的那条变高之后，底边才是仍然贴着宠物的那个边。
+#[tauri::command]
+fn resize_summary(app: AppHandle, expanded: bool) -> Result<(), String> {
+    let summary = app
+        .get_webview_window(SUMMARY)
+        .ok_or("summary window is missing")?;
+    let height = if expanded {
+        SUMMARY_EXPANDED_HEIGHT
+    } else {
+        SUMMARY_COLLAPSED_HEIGHT
+    };
+    summary
+        .set_size(tauri::LogicalSize::new(SUMMARY_WIDTH, height))
+        .map_err(|error| error.to_string())?;
+    // 不给焦点：摘要是常驻的，抢焦点会让正在输入的对话条失手。
+    let _ = show_summary(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -345,6 +469,9 @@ fn shell_commands() -> Vec<&'static str> {
         "hide_main",
         "open_bubble",
         "hide_bubble",
+        "open_summary",
+        "hide_summary",
+        "resize_summary",
         "hide_pet",
         "show_pet",
         "popup_pet_menu",
@@ -380,6 +507,20 @@ fn open_plugin_arg() -> Option<String> {
     }
 }
 
+/// `--open-summary`：启动后直接亮出摘要条。摘要条默认不显示（它一上来就抢注意力），
+/// 但验收与调试需要一条不靠鼠标的路 —— 桌面上可能有置顶程序把点击吃掉，
+/// 而无边框置顶窗口在 Windows 上常常拿不到键盘焦点（Tab / Enter 同样打不进去）。
+fn open_summary_arg() -> bool {
+    std::env::args().any(|arg| arg == "--open-summary")
+}
+
+/// `--expand-summary`：启动时就把摘要条展开。展开要经壳改窗口高度，因此这是一条
+/// 不经过界面的独立验证路径：它成立就说明高度那条路是通的，界面点不开就是输入
+/// 没送达，而不是命令没实现。
+fn expand_summary_arg() -> bool {
+    std::env::args().any(|arg| arg == "--expand-summary")
+}
+
 /// Which client this process is, and which window is asking. The renderer asks
 /// the shell instead of guessing from the URL: both clients load the same page.
 #[tauri::command]
@@ -411,6 +552,10 @@ fn client_identity(
         "windowRole": if is_view { "view" } else { "primary" },
         "pluginProvider": plugin_provider,
         "pluginPageBase": plugin_page_base(),
+        // 摘要条按窗口高度回答自己是展开还是收起：高度是壳说了算的，界面照着它
+        // 初始化。两边各记一份的话，壳按 --expand-summary 撑高之后界面还在画
+        // 收起的样子，看起来就像「展开失灵了」。
+        "summaryExpanded": summary_is_expanded(&app),
     })
 }
 
@@ -537,6 +682,20 @@ fn build_pet_windows(app: &AppHandle) -> Result<(), String> {
         .shadow(false)
         .build()
         .map_err(|error| error.to_string())?;
+    // 摘要条是常驻的一条，默认先不显示：它一上来就抢注意力，而用户可能只是
+    // 想跟 ONE 说句话。右键菜单或宠物菜单里再叫出来。
+    WebviewWindowBuilder::new(app, SUMMARY, app_url())
+        .title("ONE")
+        .inner_size(SUMMARY_WIDTH, SUMMARY_COLLAPSED_HEIGHT)
+        .visible(false)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .shadow(false)
+        .build()
+        .map_err(|error| error.to_string())?;
 
     if let Ok(Some(monitor)) = pet.primary_monitor() {
         let area = monitor.work_area();
@@ -590,9 +749,13 @@ fn pet_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         })
         .collect::<tauri::Result<_>>()?;
     let restart = MenuItem::with_id(app, RESTART_CORE, "重新启动 ONE 本体", true, None::<&str>)?;
+    // 摘要条走壳命令而不是能力调用：它是这只宠物自己的另一块屏幕，不是
+    // 另一个参与者的事，也没有第二个进程可以回话。
+    let summary = MenuItem::with_id(app, PET_SUMMARY, "今天的摘要", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, QUIT, "退出", true, None::<&str>)?;
     let mut owned = vec![launch];
     owned.extend(plugins);
+    owned.push(summary);
     owned.push(restart);
     owned.push(quit);
     let items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = owned
@@ -722,6 +885,18 @@ fn main() {
                     eprintln!("one: 打开{provider}的页面失败：{error}");
                 }
             }
+            if open_summary_arg() {
+                if let Err(error) = show_summary(&handle) {
+                    eprintln!("one: 摘要条没有打开：{error}");
+                }
+            }
+            // 高度必须**在建窗时**就定下来：界面一挂载就问壳自己多高，
+            // 之后再改高度的话那一侧要等下一次身份查询才知道。
+            if expand_summary_arg() {
+                if let Err(error) = resize_summary(handle.clone(), true) {
+                    eprintln!("one: 摘要条没有展开：{error}");
+                }
+            }
             app.on_menu_event(|app, event| match menu_action(event.id().as_ref()) {
                 Some(MenuAction::Launch(kind)) => launch_through_core(app, kind),
                 Some(MenuAction::RestartCore) => {
@@ -737,6 +912,11 @@ fn main() {
                         eprintln!("one: 打开{provider}的页面失败：{error}");
                     }
                 }
+                Some(MenuAction::OpenSummary) => {
+                    if let Err(error) = show_summary(app) {
+                        eprintln!("one: 摘要条没有打开：{error}");
+                    }
+                }
                 Some(MenuAction::Quit) => quit_app(app.clone()),
                 None => {}
             });
@@ -747,6 +927,9 @@ fn main() {
             hide_main,
             open_bubble,
             hide_bubble,
+            open_summary,
+            hide_summary,
+            resize_summary,
             hide_pet,
             show_pet,
             start_drag,
@@ -835,6 +1018,67 @@ mod tests {
     }
 
     #[test]
+    fn the_summary_sits_above_the_pet_and_flips_down_when_it_cannot() {
+        // 摘要条是常驻的，压在宠物上面才不会被宠物挡住；宠物贴着屏幕顶端时
+        // 上方放不下，就得翻到下面，而不是跑到屏幕外。
+        let pet = Rect { x: 1000, y: 300, width: 128, height: 128 };
+        let summary = Rect { x: 0, y: 0, width: 360, height: 96 };
+        let work = Rect { x: 0, y: 0, width: 1920, height: 1040 };
+        assert_eq!(
+            place_beside(pet, summary, work, 12, Side::Above),
+            (884, 192)
+        );
+        let low = Rect { x: 1000, y: 40, width: 128, height: 128 };
+        assert_eq!(
+            place_beside(low, summary, work, 12, Side::Above),
+            (884, 180),
+            "上方 40 - 96 - 12 < 0，应当翻到下面：40 + 128 + 12 = 180"
+        );
+    }
+
+    #[test]
+    fn the_summary_stays_inside_the_work_area_on_a_second_display() {
+        let work = Rect { x: 1920, y: -200, width: 1280, height: 1000 };
+        let pet = Rect { x: 3100, y: 700, width: 128, height: 128 };
+        let summary = Rect { x: 0, y: 0, width: 360, height: 420 };
+        let (x, y) = place_beside(pet, summary, work, 12, Side::Above);
+        assert!(x >= work.x && x + 360 <= work.x + work.width);
+        assert!(y >= work.y && y + 420 <= work.y + work.height);
+    }
+
+    #[test]
+    fn the_expanded_summary_is_taller_than_the_collapsed_one() {
+        // 展开高度不够的话，被裁掉的正好是数据 —— 看起来就像「日程丢了」。
+        assert!(SUMMARY_EXPANDED_HEIGHT > SUMMARY_COLLAPSED_HEIGHT);
+        // 收起时要放得下一句话加一行凭据，别一打开就是滚动条。
+        assert!(SUMMARY_COLLAPSED_HEIGHT >= 80.0);
+    }
+
+    #[test]
+    fn both_attached_windows_share_one_placement_rule() {
+        // 对话条与摘要条是同一类附属窗口，规则只有一份（place_beside）：放得下就在
+        // 偏好的一侧，放不下才翻面，两侧都放不下才夹进工作区。
+        let strip = Rect { x: 0, y: 0, width: 360, height: 96 };
+        let work = Rect { x: 0, y: 0, width: 1920, height: 1040 };
+        // 判定看的是**整条放不放得下**：y = 1040 时底边到 1136，超出工作区 96。
+        let low = Rect { x: 900, y: 900, width: 128, height: 128 };
+        assert_eq!(
+            place_beside(low, strip, work, 12, Side::Below).1,
+            792,
+            "下面放不下（1040 + 96 > 1040），翻到上面"
+        );
+        assert_eq!(
+            place_beside(low, strip, work, 12, Side::Above).1,
+            792,
+            "摘要条本来就想在上面，不用翻"
+        );
+        // 宠物在中间偏上时两者才分得开：下面放得下就往下，摘要条仍然往上。
+        let mid = Rect { x: 900, y: 300, width: 128, height: 128 };
+        assert_eq!(place_beside(mid, strip, work, 12, Side::Below).1, 440);
+        assert_eq!(place_beside(mid, strip, work, 12, Side::Above).1, 192);
+    }
+
+    #[test]
     fn every_menu_item_the_menus_declare_has_a_handler() {
         // 菜单项加上去却没接线的后果是"点了没反应"，用户看不出是坏了还是没用。
         for id in [
@@ -842,6 +1086,7 @@ mod tests {
             LAUNCH_PET,
             RESTART_CORE,
             PET_BUBBLE,
+            PET_SUMMARY,
             PET_SHOW,
             QUIT,
         ] {

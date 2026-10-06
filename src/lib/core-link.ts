@@ -94,6 +94,13 @@ export interface CoreClient {
   subscribe(listener: () => void): () => void;
   roster(): Roster;
   snapshot(): Snapshot;
+  /**
+   * 最近一次收到的一帧状态带的是第几版。**没收到过就是 -1**，不是 0：
+   * 摘要条要写「本体状态 #7」让用户知道这份数据出自哪一版，而 -1 意味着
+   * 「还不知道」——把它写成 0 就会看起来像本体重启后从没推进过的第一版，
+   * 两种情况该说的话不一样（ADR-013）。
+   */
+  revision(): number;
   /** 本体拒绝了这个客户端时给出的原因，例如协议版本不兼容。 */
   refusal(): string;
   /** 现在拿不到状态的原因：被拒绝，或者帧送不出去。界面要把它说出来。 */
@@ -427,6 +434,7 @@ export function createCoreClient(
     subscribe,
     roster: () => roster,
     snapshot: () => snapshot,
+    revision: () => revision,
     refusal: () => refusal,
     problem: () => refusal || failure,
     listClients: () =>
