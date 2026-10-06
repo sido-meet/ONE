@@ -2,6 +2,15 @@ import { connectToCore } from './link.ts';
 import type { CoreMessage } from '../../packages/contracts/src/wire.ts';
 import { WIRE_VERSION } from '../../packages/contracts/src/wire.ts';
 
+/** 动作 → 本体白名单命令的后缀。两层命名不同：命令是本体 API，能力是提供方 API。 */
+const ACTION_SUFFIX: Record<string, string> = {
+  list: 'List',
+  create: 'Create',
+  update: 'Update',
+  remove: 'Delete',
+  delete: 'Delete',
+};
+
 /**
  * 命令行客户端：ONE 本体不依赖任何图形界面就能使用。
  * 同时也是客户端协议的最小参考实现——宠物和桌面端走的是同一条路径。
@@ -80,6 +89,35 @@ export async function runCli(argv: string[], pipe?: string) {
       // 能力名不再自带 "pet." 前缀，所以两个参数必须分开给。
       target: second ?? 'pet',
       capability: argv[2] ?? '',
+    }));
+    process.stdout.write(`${JSON.stringify(reply)}\n`);
+  } else if (first === 'calendar' || first === 'notes') {
+    // 本体不依赖图形界面就该能用：领域命令也必须能命令行驱动，否则"宠物坏了
+    // 就什么都做不了"。输入是 JSON，由本体在边界校验（ADR-016 第 4 点）。
+    const action = second ?? 'list';
+    const input = argv[2] ?? '{}';
+    const context = {
+      requestId: `cli-${Date.now()}`,
+      workspaceId: 'personal',
+      source: 'ui' as const,
+    };
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(input);
+    } catch (error) {
+      process.stdout.write(
+        `${JSON.stringify({
+          ok: false,
+          message: `输入不是合法 JSON：${(error as Error).message}`,
+        })}\n`,
+      );
+      return;
+    }
+    const reply = await ask((id) => ({
+      t: 'call',
+      id,
+      cmd: `${first}${ACTION_SUFFIX[action] ?? ''}`,
+      args: [context, parsed],
     }));
     process.stdout.write(`${JSON.stringify(reply)}\n`);
   } else if (first === 'launch') {

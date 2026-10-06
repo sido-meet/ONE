@@ -21,6 +21,9 @@ shot*.png
 pet-*.png
 probe.png
 tmp.png
+# 领域验收的临时产物（d3-out*.json 等），只用来肉眼核对返回值。
+d3-*.json
+d3-*.txt
 scripts/.fix-codes.mjs
 .DS_Store
 .idea/

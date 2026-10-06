@@ -27,19 +27,28 @@ import type {
 /** 两类领域能力。Agent 不是领域能力，不进这里。 */
 export type DomainKind = 'calendar' | 'notes';
 
-/** 能力名只说做什么，不带实现前缀（ADR-017）：换实现不改调用方。 */
+/**
+ * 能力名只说做什么，不带实现前缀（ADR-017）：换实现不改调用方。
+ *
+ * 用 `remove` 而不是 `delete`：帧上跑的是 JSON，`delete` 在这里没有任何语法上的
+ * 必要，而"删除"与"清空/丢弃"在中文语境里容易混。端口方法名与之保持一致。
+ */
 export const CALENDAR_CAPABILITIES = [
   'calendar.list',
   'calendar.create',
   'calendar.update',
-  'calendar.delete',
+  'calendar.remove',
 ] as const;
 export const NOTES_CAPABILITIES = [
   'notes.list',
   'notes.create',
   'notes.update',
-  'notes.delete',
+  'notes.remove',
 ] as const;
+
+/** 端口方法名，也就是能力名后缀。两者必须一一对应。 */
+export const DOMAIN_ACTIONS = ['list', 'create', 'update', 'remove'] as const;
+export type DomainAction = (typeof DOMAIN_ACTIONS)[number];
 
 /** 中文标签集中在这里，文案不散落到各个调用点。 */
 export const DOMAIN_LABELS: Record<DomainKind, string> = {

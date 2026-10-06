@@ -5,9 +5,11 @@ import {
 } from '../../packages/mock-runtime/src/index.ts';
 import type { MemoryProviders } from '../../packages/mock-runtime/src/index.ts';
 import type {
+  CalendarProvider,
   CommandContext,
   ConversationRuntime,
   CoreMessage,
+  ProviderSlot,
 } from '../../packages/contracts/src/index.ts';
 import {
   PROVIDER_CONTRACT_VERSION,
@@ -163,6 +165,14 @@ describe('core dispatching domain commands', () => {
   /** handleMessage 要的是会话，不是连接；connect 会把它返回来。 */
   let session: ReturnType<Core['connect']>;
 
+  /** 端口现在是函数：状态每次现读。这里包一层，把固定的 slot 固定下来。 */
+  const fixed =
+    (
+      slot: ProviderSlot<CalendarProvider> | undefined,
+    ): (() => ProviderSlot<CalendarProvider> | undefined) =>
+    () =>
+      slot;
+
   const connect = (domains?: (p: MemoryProviders) => DomainPorts) => {
     runtime = createMockClient();
     providers = createMemoryProviders();
@@ -229,7 +239,11 @@ describe('core dispatching domain commands', () => {
 
     core.unsubscribe();
     connect(() => ({
-      calendar: { id: 'local.calendar', kind: 'calendar', status: 'stopped' },
+      calendar: fixed({
+        id: 'local.calendar',
+        kind: 'calendar',
+        status: 'stopped',
+      }),
     }));
     expect(await call('calendarCreate', [context, meeting])).toMatchObject({
       ok: false,
@@ -238,12 +252,12 @@ describe('core dispatching domain commands', () => {
 
     core.unsubscribe();
     connect(() => ({
-      calendar: {
+      calendar: fixed({
         id: 'outlook.calendar',
         kind: 'calendar',
         status: 'denied',
         missingPermissions: ['Mail.Read'],
-      },
+      }),
     }));
     const deniedError = failureOf(
       await call('calendarCreate', [context, meeting]),
@@ -255,10 +269,10 @@ describe('core dispatching domain commands', () => {
 
     core.unsubscribe();
     connect((p) => ({
-      calendar: {
+      calendar: fixed({
         ...ready(p),
         providerVersion: PROVIDER_CONTRACT_VERSION + 1,
-      },
+      }),
     }));
     expect(await call('calendarCreate', [context, meeting])).toMatchObject({
       ok: false,
@@ -279,7 +293,7 @@ describe('core dispatching domain commands', () => {
   });
 
   it('validates input at the boundary once the provider is reachable', async () => {
-    connect((p) => ({ calendar: ready(p) }));
+    connect((p) => ({ calendar: fixed(ready(p)) }));
     expect(
       failureOf(
         await call('calendarCreate', [
@@ -291,7 +305,7 @@ describe('core dispatching domain commands', () => {
   });
 
   it('keeps domain data out of the conversation snapshot', async () => {
-    connect((p) => ({ calendar: ready(p) }));
+    connect((p) => ({ calendar: fixed(ready(p)) }));
     expect(await call('calendarCreate', [context, meeting])).toMatchObject({
       ok: true,
     });

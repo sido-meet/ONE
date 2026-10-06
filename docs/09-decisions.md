@@ -93,7 +93,7 @@
 
 **代价（已接受）**：每个提供方一个进程，需要进程监督（ADR-015 的重新评估条件因此提前命中）；规范接口意味着实现方要跟协议演进；本体要为每个提供方写一份远程代理实现。收益是本体崩溃不带走日历数据，且替换实现不用碰本体。
 
-**验证证据**：`packages/contracts/src/provider.ts` 已定义 `CalendarProvider` / `NotesProvider`（收已解析类型）与 `resolveProvider`，四类不可用各有 `details.providerProblem.reason`；`core/src/provider-errors.test.ts` 6 项覆盖它们经命令白名单回传到线上的全过程；`Snapshot` 已无 `notes` / `calendarEvents`，`pnpm test` 40 项与 `svelte-check` 全过。**尚未实现**：提供方仍是本体进程内的内存实现（`core/src/index.ts` 有注明），不是独立插件进程，数据不落盘 —— D03 才是真提供方。
+**验证证据**：`packages/provider-local` 是第一个真实实现 —— 本体外的独立进程，数据落自己的目录，经本体转发。实机验收：本体与提供方全部杀掉后重启，日程仍在（同一 id 与标题），幂等键重发返回同一条；杀提供方得 `not-running`（「日历源没有连上」），安装清单里去掉日历源得 `not-installed`（「还没有接日历源」），两者由 `details.providerProblem.reason` 分开。测试：`provider.test.ts` 6 项（落盘、重启后读取、幂等回执也落盘、版本冲突、工作区隔离、坏文件拒绝覆盖）、`registry.test.ts` 7 项（状态现读、断线回落、少报能力算没授权、未登记按没安装、呈现形式冒充 provider 不算数、本体不留实体只转发）、`provider-errors.test.ts` 6 项（未授权与版本冲突的线上回传）。`pnpm test` 69 项全过。
 
 **迁移影响**：`OneClient` 拆成会话运行时与领域端口两部分；`Snapshot` 摘掉 `notes` / `calendarEvents`，改由本体向提供方取；`core.ts` 的命令白名单不再直接转给 `OneClient`，而是先解析到提供方。
 

@@ -38,12 +38,18 @@ export interface Connection {
 }
 
 /**
- * 本体持有的领域端口（ADR-016）。slot 为 undefined 表示「没安装」，
- * 与「装了但没运行」是两种情况，由 resolveProvider 分开报错。
+ * 本体持有的领域端口（ADR-016）。
+ *
+ * 是**函数**而不是值：提供方是运行时连上来的进程，在线状态随时会变。把 slot
+ * 冻在启动那一刻的话，提供方连上之后仍会被报成「没运行」。每次命令现读一次，
+ * 拿到的就是当下的实情。
+ *
+ * 返回 undefined 表示「没安装」，与「装了没运行」是两种情况，由 resolveProvider
+ * 分开报错。
  */
 export interface DomainPorts {
-  calendar?: ProviderSlot<CalendarProvider>;
-  notes?: ProviderSlot<NotesProvider>;
+  calendar?: () => ProviderSlot<CalendarProvider> | undefined;
+  notes?: () => ProviderSlot<NotesProvider> | undefined;
 }
 
 export interface CoreOptions {
@@ -121,42 +127,42 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
       runtime.sendMessage(args[0] as string, args[1] as string),
     cancelRun: (...args) => runtime.cancelRun(args[0] as string),
     calendarList: (...args) =>
-      resolveProvider(domains.calendar, 'calendar').list(
+      resolveProvider(domains.calendar?.(), 'calendar').list(
         contextOf(args),
         parseCalendarList(args[1]),
       ),
     calendarCreate: (...args) =>
-      resolveProvider(domains.calendar, 'calendar').create(
+      resolveProvider(domains.calendar?.(), 'calendar').create(
         contextOf(args),
         parseCalendarCreate(args[1]),
       ),
     calendarUpdate: (...args) =>
-      resolveProvider(domains.calendar, 'calendar').update(
+      resolveProvider(domains.calendar?.(), 'calendar').update(
         contextOf(args),
         parseCalendarUpdate(args[1]),
       ),
     calendarDelete: (...args) =>
-      resolveProvider(domains.calendar, 'calendar').remove(
+      resolveProvider(domains.calendar?.(), 'calendar').remove(
         contextOf(args),
         parseCalendarDelete(args[1]),
       ),
     notesList: (...args) =>
-      resolveProvider(domains.notes, 'notes').list(
+      resolveProvider(domains.notes?.(), 'notes').list(
         contextOf(args),
         parseNotesList(args[1]),
       ),
     notesCreate: (...args) =>
-      resolveProvider(domains.notes, 'notes').create(
+      resolveProvider(domains.notes?.(), 'notes').create(
         contextOf(args),
         parseNotesCreate(args[1]),
       ),
     notesUpdate: (...args) =>
-      resolveProvider(domains.notes, 'notes').update(
+      resolveProvider(domains.notes?.(), 'notes').update(
         contextOf(args),
         parseNotesUpdate(args[1]),
       ),
     notesDelete: (...args) =>
-      resolveProvider(domains.notes, 'notes').remove(
+      resolveProvider(domains.notes?.(), 'notes').remove(
         contextOf(args),
         parseNotesDelete(args[1]),
       ),
@@ -264,6 +270,49 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
     });
     found.connection.send({ t: 'invoke', id, capability, args });
   };
+
+  /**
+   * 本体自己发起的能力调用（ADR-016）。领域端口的远端实现靠它把请求转给管道
+   * 另一端的提供方 —— 本体仍然是唯一调用方，只不过这次它代表自己说话，
+   * 而不是替某个客户端转发。寻址、能力检查与超时都与 handleCapabilityCall
+   * 同一套，免得两条路给出不同的失败语义。
+   */
+  const invoke = (
+    target: ProviderId,
+    capability: string,
+    args?: unknown,
+  ): Promise<unknown> =>
+    new Promise((resolve, reject) => {
+      const found = [...sessions.values()].find(
+        (session) => session.info.provider === target,
+      );
+      if (!found) {
+        reject(new ClientError('UNAVAILABLE', `${target} 没有在运行`));
+        return;
+      }
+      if (!found.info.capabilities.includes(capability)) {
+        reject(
+          new ClientError('NOT_FOUND', `${target} 没有提供 ${capability}`),
+        );
+        return;
+      }
+      const id = crypto.randomUUID();
+      const timer = setTimeout(() => {
+        found.waiting.delete(id);
+        reject(new ClientError('TIMEOUT', `${target} 没有回应 ${capability}`));
+      }, options.capabilityTimeoutMs ?? CAPABILITY_TIMEOUT_MS);
+      found.waiting.set(id, {
+        resolve: (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        reject: (message) => {
+          clearTimeout(timer);
+          reject(new ClientError('INTERNAL', message));
+        },
+      });
+      found.connection.send({ t: 'invoke', id, capability, args });
+    });
 
   const handleLaunch = async (id: string, provider: ProviderId) => {
     const running = [...sessions.values()].some(
@@ -420,6 +469,7 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
     handleMessage,
     unsubscribe,
     roster,
+    invoke,
     installed: () => [...installed],
     markInstalled(provider: ProviderId) {
       installed.add(provider);

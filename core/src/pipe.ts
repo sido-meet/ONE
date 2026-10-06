@@ -35,6 +35,9 @@ export function serveOnPipe(core: Core, path = PIPE_PATH) {
       }
     };
 
+    // 必须显式按 utf8 解码：不定编码时每个 chunk 各自 toString，一个中文字的三个
+    // 字节如果跨 chunk 边界就会被截成替换字符。帧越长越容易踩到。
+    socket.setEncoding('utf8');
     socket.on('data', (chunk: string) => {
       buffer += chunk;
       if (buffer.length > MAX_FRAME_BYTES) {
