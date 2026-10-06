@@ -342,10 +342,14 @@ fn client_identity(
     client: State<'_, ClientKind>,
 ) -> Value {
     let status = link.status();
+    // 一个客户端进程里有多个窗口，它们共用同一根管道，因此共用同一个会话。
+    // 但对话条只是宠物的另一块屏幕：它要状态，不要能力——否则"请宠物打开对话条"
+    // 会被同进程的每个窗口各答一次，靠"谁先回"决定结果。
+    let is_view = window.label() != client.primary_window;
     json!({
         "kind": status.kind,
         "label": status.label,
-        "capabilities": status.capabilities,
+        "capabilities": if is_view { Vec::new() } else { status.capabilities.clone() },
         "wireVersion": status.wire_version,
         "window": window.label(),
         "primaryWindow": client.primary_window,
@@ -565,7 +569,7 @@ fn main() {
         .manage(identity)
         .setup(move |app| {
             let handle = app.handle().clone();
-            // 顺序很重要：先装好本体桥接，再开窗。窗口一创建，页面就会立刻调用
+            // 顺序很重要。先装好本体桥接，再开窗：窗口一创建，页面就会立刻调用
             // 壳命令；发布版资源是内嵌的，加载比开发版快得多，桥接晚一步就
             // 会让界面拿到 "state not managed"，然后整页空白。
             core_link::start_bridge(
@@ -575,16 +579,18 @@ fn main() {
                 identity.capabilities,
                 WIRE_VERSION,
             );
+            // 本体是默认安装的那一半，客户端保证它活着。再往前挪是为了让"先起
+            // 后端、再连接、最后才是界面"成立：本体没起来之前就把窗口摆出来，
+            // 用户会先看到一个写着"本体未连接"的宠物。
+            if let Err(error) = core_link::start_core() {
+                eprintln!("one: 本体没有启动，界面会显示未连接：{error}");
+            }
             if let Err(error) = build_windows(&handle, client) {
                 eprintln!("one: 创建客户端窗口失败：{error}");
                 return Err(error.into());
             }
             if let Err(error) = install_menu(&handle, client) {
                 eprintln!("one: 安装菜单失败：{error}");
-            }
-            // 本体是默认安装的那一半：客户端保证它活着，重连循环负责接上。
-            if let Err(error) = core_link::start_core() {
-                eprintln!("one: 本体没有启动，界面会显示未连接：{error}");
             }
             app.on_menu_event(|app, event| match menu_action(event.id().as_ref()) {
                 Some(MenuAction::Launch(kind)) => launch_through_core(app, kind),

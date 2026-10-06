@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::os::windows::io::AsRawHandle;
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::thread;
@@ -24,6 +25,8 @@ const RECONNECT_DELAY: Duration = Duration::from_millis(700);
 /// 所以先问"还有多少字节可读"，没有就让出文件对象，写端才有机会把帧送出去。
 const POLL_MIN: Duration = Duration::from_millis(2);
 const POLL_MAX: Duration = Duration::from_millis(50);
+/// 启动本体时不要给它分配控制台窗口，见 start_core。
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// 同一根管道要同时供本体、宠物和桌面端使用，所以路径不随客户端变化。
 const CORE_ENTRY: &str = "core/src/index.ts";
 
@@ -214,13 +217,17 @@ pub fn start_core() -> Result<(), String> {
         return Err(format!("找不到本体入口：{}", script.display()));
     }
     thread::spawn(move || {
-        let Ok(mut child) = std::process::Command::new("node")
+        let mut command = std::process::Command::new("node");
+        command
             .arg(&script)
             .current_dir(&root)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        else {
+            .stderr(std::process::Stdio::piped());
+        // 客户端本身是 GUI 子系统（不弹控制台），而 node 是控制台程序：父进程
+        // 没有控制台时，Windows 会给它新分配一个，于是每开一次宠物就闪一个黑框。
+        // CREATE_NO_WINDOW 让本体在后台安静地跑，日志仍然走 stderr 转发。
+        command.creation_flags(CREATE_NO_WINDOW);
+        let Ok(mut child) = command.spawn() else {
             eprintln!("one: 启动本体失败：node 不可用");
             return;
         };

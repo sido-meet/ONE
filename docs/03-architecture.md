@@ -44,6 +44,9 @@ flowchart TB
 
 - **壳的管道读写不能共用一个文件对象。** 写入句柄是 `File::try_clone()` 出来的，而 Windows 上 `try_clone` 走 `DuplicateHandle` —— 两个句柄指向同一个文件对象，同步 I/O 在文件对象上是串行化的。只要读取线程停在 `ReadFile` 等数据，写端的 `write_all` 就永远排队；而本体在收到第一帧之前不会主动说话，两边互等到死锁。症状是"客户端连上了管道但永远完不成握手"。现在读端用 `PeekNamedPipe` 轮询，没有数据就让出文件对象（`core_link.rs`）。任何新的管道读写代码都必须遵守这一点。
 - **Tauri 命令的注册顺序即契约。** `start_bridge` 必须早于 `build_windows`：发布版资源是内嵌的，加载比开发版快得多，桥接晚一步界面就会拿到 `state not managed` 然后整页空白。开发态被 vite 的慢启动掩盖了这个竞态。
+- **启动顺序就是用户体验。** `start_bridge` → `start_core` → `build_windows`：先装桥接，再把本体拉起来，最后才摆窗口。本体起来要几百毫秒，先摆窗口的话用户会先看到一个写着"本体未连接"的宠物。
+- **拉起本体必须用 `CREATE_NO_WINDOW`。** 客户端是 GUI 子系统，本身不弹控制台；但 `node` 是控制台程序，父进程没有控制台时 Windows 会给它新分配一个，于是每开一次宠物闪一个黑框。日志仍然走 stderr 转发到壳，不受影响。
+- **一个客户端进程里的多个窗口共用一根管道，也就共用一个会话。** 对话条是宠物的另一块屏幕：它要状态，但壳不给它声明能力（`client_identity` 按窗口返回），因此不会和宠物窗口抢着回答同一个能力调用。
 - **发布版必须用 `pnpm desktop:build`。** 直接 `cargo build --release` 不会重新嵌入前端资源，会得到一个打不开的页面。
 - **客户端种类有两条通道**：`--client=` 给已构建的 exe，`ONE_CLIENT` 环境变量给 `tauri dev`（Tauri CLI 会把 `--client=pet` 错位传给 cargo）。
 

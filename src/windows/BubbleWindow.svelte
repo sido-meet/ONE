@@ -153,6 +153,8 @@
       onmousedown={() => void shell.startDrag()}
     ></button>
     <label class="sr-only" for="quick-input">对 ONE 说点什么</label>
+    <!-- 自动填充/autocomplete 全部关掉：一聚焦就弹的下拉会盖住状态云，
+         而这条输入框本来就没有可填的历史。 -->
     <input
       id="quick-input"
       bind:this={inputElement}
@@ -161,6 +163,9 @@
       placeholder={error ||
         (coreState === 'ready' ? '对 ONE 说点什么…' : '本体未连接')}
       disabled={coreState !== 'ready'}
+      autocomplete="off"
+      autocapitalize="off"
+      spellcheck="false"
       onkeydown={(event) => {
         // 中文输入法确认候选词时也会给 Enter，不能当成发送。
         if (event.key === 'Enter' && !event.isComposing) {
@@ -187,6 +192,7 @@
   :global(html:root),
   :global(body) {
     background: transparent;
+    overflow: hidden;
   }
   .strip {
     display: flex;

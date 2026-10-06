@@ -77,6 +77,17 @@ function placeholderLink(): CoreClient {
 function capabilityHandlers(
   self: ClientIdentity,
 ): Record<string, CapabilityHandler> {
+  const all = allCapabilityHandlers(self);
+  // 只实现壳给这个窗口声明过的能力。对话条是宠物的另一块屏幕，它要状态不要
+  // 能力：同一进程里两个窗口抢着回答同一个调用，胜负只取决于谁先回。
+  return Object.fromEntries(
+    Object.entries(all).filter(([name]) => self.capabilities.includes(name)),
+  );
+}
+
+function allCapabilityHandlers(
+  self: ClientIdentity,
+): Record<string, CapabilityHandler> {
   const summary = () => {
     const snapshot = link.snapshot();
     return {

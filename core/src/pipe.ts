@@ -60,9 +60,12 @@ export function serveOnPipe(core: Core, path = PIPE_PATH) {
             return;
           }
           // The first frame creates the session; every later frame is a command.
+          const fresh = session === null;
           session ??= core.connect(connection, parsed);
           if (session) {
-            if (parsed.t === 'hello') {
+            // 一个客户端进程里的多个窗口共用一根管道，各自会发一次 hello。
+            // 只有真正建立会话的那一次才算"接入"，否则日志会凭空多出几个宠物。
+            if (parsed.t === 'hello' && fresh) {
               log(
                 `客户端 ${parsed.client.kind} 接入（${
                   parsed.client.capabilities.join('、') || '无能力'
