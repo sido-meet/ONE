@@ -61,7 +61,7 @@ desktop:build 当前只构建可执行程序，不生成安装包。Tauri 标识
 ## 开发习惯
 
 - 推荐编辑器装 Svelte 与 Rust 支持；不强依赖具体 IDE。
-- Git 默认 main 分支，功能分支建议 feature/任务简名。当前没有远程仓库或自动推送。
+- Git 默认 main 分支，功能分支建议 feature/任务简名。远程仓库 origin 为 `git@github.com:sido-meet/ONE.git`，推送会触发前端 CI（仅前端检查，不含 native 构建）。是否提交与推送由开发者决定，不做自动推送。
 - 提交说明描述用户可见变化；PR 写问题、行为变化、验证和限制。
 - 新增目录只在有实现时创建，不预造几十个空包。
 - .env 不提交；.env.example 只放字段说明。VITE_ 变量会进入前端，不能存模型密钥。
