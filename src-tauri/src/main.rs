@@ -302,9 +302,13 @@ fn popup_pet_menu(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
         return Err("only the pet window shows the pet menu".into());
     }
     let menu = pet_menu(&app).map_err(|error| error.to_string())?;
-    window
-        .popup_menu(&menu)
-        .map_err(|error| error.to_string())
+    // TrackPopupMenu 一直阻塞到菜单被关掉，所以这行日志是"菜单正在显示"，
+    // 它的下一行才是"菜单已经关掉了"。排查点不到菜单时先看这里。
+    eprintln!("one: 宠物菜单已弹出");
+    window.popup_menu(&menu).map_err(|error| {
+        eprintln!("one: 宠物菜单没能弹出：{error}");
+        error.to_string()
+    })
 }
 
 /// Lets the frontend catch a renamed or missing command instead of silently
@@ -478,10 +482,10 @@ fn build_windows(app: &AppHandle, client: ClientKindArg) -> Result<(), String> {
     }
 }
 
-/// The pet's menu, defined once: the window menu for keyboard access and the
-/// right-click popup have to stay the same list, or one of them quietly goes
-/// missing. A client never spawns another one directly — launching goes through
-/// core, the only thing that knows what is installed.
+/// 宠物的菜单只以右键弹窗出现，右键和键盘（菜单键 / Shift+F10）都走这里。
+/// 定义一次给两处用，否则两边的清单迟早走偏。
+/// 客户端之间不直接 spawn：启动和请宠物做事都经本体，只有本体知道装了什么、
+/// 谁连着。
 fn pet_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let launch = MenuItem::with_id(app, LAUNCH_DESKTOP, "打开 ONE 桌面端", true, None::<&str>)?;
     let restart = MenuItem::with_id(app, RESTART_CORE, "重新启动 ONE 本体", true, None::<&str>)?;
@@ -500,14 +504,15 @@ fn desktop_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 /// Only the window a client owns itself carries the window menu. Setting it on
 /// the app would paint a menu bar inside every window — including the pet's
 /// conversation strip, which is a floating bar and must stay frameless.
+/// 只有带标题栏的窗口才挂窗口菜单。宠物窗口是无边框透明的，Windows 会把菜单栏
+/// 直接画进那 128×128 的客户区里，一直压在宠物身上——它没有右键弹窗就够了。
 fn install_menu(app: &AppHandle, client: ClientKindArg) -> tauri::Result<()> {
+    if matches!(client, ClientKindArg::Pet) {
+        return Ok(());
+    }
     let window = app.get_webview_window(ClientKind::of(client).primary_window);
-    let menu = match client {
-        ClientKindArg::Pet => pet_menu(app)?,
-        ClientKindArg::Desktop => desktop_menu(app)?,
-    };
     window
-        .map(|window| window.set_menu(menu).map(|_| ()))
+        .map(|window| window.set_menu(desktop_menu(app)?).map(|_| ()))
         .unwrap_or(Ok(()))
 }
 

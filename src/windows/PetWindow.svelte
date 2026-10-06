@@ -117,7 +117,19 @@
     aria-label="移动宠物：拖动这条，或用方向键移动（按住 Shift 微调）"
     title="拖动移动"
     onmousedown={() => void shell.startDrag()}
-    onkeydown={move}
+    onkeydown={(event) => {
+      // 菜单不再挂在窗口上（无边框窗口会被 Windows 画一条菜单栏在宠物身上），
+      // 键盘用户改用菜单键或 Shift+F10，和右键走同一条路。
+      if (
+        event.key === 'ContextMenu' ||
+        (event.shiftKey && event.key === 'F10')
+      ) {
+        event.preventDefault();
+        void shell.popupPetMenu();
+        return;
+      }
+      move(event);
+    }}
   ></button>
 </div>
 
