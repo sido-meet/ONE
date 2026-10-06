@@ -14,9 +14,13 @@ coverage/
 # 联调时抓的运行输出与截图；它们是排查记录，不是源码。
 dev*.txt
 pet-*.txt
+one-*.txt
 core-*.log
 core-*.txt
 shot*.png
+pet-*.png
+probe.png
+tmp.png
 scripts/.fix-codes.mjs
 .DS_Store
 .idea/
