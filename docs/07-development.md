@@ -102,6 +102,25 @@ pwsh -NoProfile -File .one\list-windows.ps1        # 列出窗口位置尺寸到
 
 `.one` 下的验收脚本一律**写文件不打印**：PowerShell 捕获子进程输出会按 GBK 解释 UTF-8 字节，中文全变乱码，那不是程序的错。读文件用 read 工具。
 
+## 调试附属窗口布局
+
+```powershell
+src-tauri\target\release\one-desktop.exe --client=pet --open-summary --expand-summary --open-bubble
+```
+
+三个参数一起用，**三块同时在场** —— 那是不互相遮挡唯一有意义的时刻（只开一个时它无处可撞）。看窗口落在哪：
+
+```powershell
+pwsh -NoProfile -File .one\list-windows.ps1        # 位置尺寸写文件
+node .one\drag-pet.mjs .one\drag.txt 300 200      # 把宠物挪到 (300,200) 并看跟随结果
+```
+
+`drag-pet.mjs` 用系统 API 移动宠物窗口，触发的是**和鼠标拖动完全相同**的 `WindowEvent::Moved` 路径 —— 所以它验的是跟随本身，不受「置顶程序吃掉合成点击」影响。
+
+**跟随坏掉时先看日志**：`one: 宠物移动了，重新摆附属窗口` 这行出现却没有后续，说明后台线程退出了 —— 曾经就是这个 bug（`if !settled { break }` 把「还没停」当成了「退出」）。
+
+拖动跟随是 60ms 一查、140ms 静止判定，拖完约 0.2 秒落定。`drag-pet.mjs` 内部已经等了 900ms。
+
 ## 改管道代码前必读
 
 壳与本体之间是 Windows 命名管道。写入句柄由 `File::try_clone()` 得到，而 Windows 上 `try_clone` 走 `DuplicateHandle`：两个句柄指向同一个文件对象，同步 I/O 在文件对象上串行化。**只要读取线程停在 `ReadFile` 里等数据，写端就永远发不出去** —— 而本体在收到第一帧之前不会主动说话，所以握手会静默卡死，症状是"名册里没有这个客户端，但管道明明连上了"。现在的读端用 `PeekNamedPipe` 轮询，没有数据就让出文件对象（`src-tauri/src/core_link.rs`）。改这块之前先读那里的注释。

@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tauri::{
     http::{header, Response, StatusCode},
-    AppHandle, Manager, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 
 use crate::core_link::CoreLink;
@@ -268,6 +268,15 @@ pub fn connected_views(app: &AppHandle) -> Vec<(String, String)> {
                 .to_string();
             Some((provider, label))
         })
+        .collect()
+}
+
+/// 已经开着的插件页面窗口。布局仲裁要用它们当障碍物：别的窗口摆到插件页面上面，
+/// 插件页面就点不到了（D06）。
+pub fn open_windows(app: &AppHandle) -> Vec<WebviewWindow> {
+    app.webview_windows()
+        .into_values()
+        .filter(|window| window.label().starts_with(WINDOW_PREFIX))
         .collect()
 }
 

@@ -580,7 +580,6 @@ mod tests {
         assert_eq!(frames.len(), 1);
         assert!(frames[0].contains("\"revision\":2"));
     }
-    use super::*;
     use serde_json::json;
     use std::sync::Arc;
 

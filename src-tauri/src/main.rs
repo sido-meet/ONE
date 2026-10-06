@@ -1,10 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod core_link;
+mod layout;
 mod plugin;
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use layout::{Placement, Rect, Side};
 use serde_json::{json, Value};
 use tauri::{
     menu::{Menu, MenuItem},
@@ -152,78 +155,57 @@ impl ClientKindArg {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Rect {
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-}
-
-fn clamp(value: i32, min: i32, max: i32) -> i32 {
-    if max < min {
-        return min;
-    }
-    value.max(min).min(max)
-}
-
-/// 附属窗口落在宠物的哪一侧。两者不是随手定的：对话条是被叫出来才出现的，
-/// 贴着宠物下方最不挡事；摘要条是常驻的「今天有什么」，压在宠物上面才不会被
-/// 宠物本体挡住，而宠物在屏幕角落时上面往往更空。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Side {
-    Below,
-    Above,
-}
-
-/// 把一个附属窗口摆到宠物旁边：先落在偏好的一侧，放不下就翻到另一侧，
-/// 两边都放不下才夹回工作区里。水平方向永远居中于宠物。
+/// 附属窗口的跟随节奏（D06）。
 ///
-/// 这条规则是 D06 布局仲裁的共同底座：四个窗口共用它，才不会出现「对话条会
-/// 翻面而摘要条不会」这种各写一份、慢慢走偏的情况。
-fn place_beside(
-    pet: Rect,
-    target: Rect,
-    work: Rect,
-    gap: i32,
-    prefer: Side,
-) -> (i32, i32) {
-    let x = clamp(
-        pet.x + pet.width / 2 - target.width / 2,
-        work.x,
-        work.x + work.width - target.width,
-    );
-    let near = pet.y + pet.height + gap;
-    let far = pet.y - target.height - gap;
-    let (first, second) = match prefer {
-        Side::Below => (near, far),
-        Side::Above => (far, near),
-    };
-    let fits_first = match prefer {
-        Side::Below => first <= work.y + work.height - target.height,
-        Side::Above => first >= work.y,
-    };
-    let fits_second = match prefer {
-        Side::Below => second >= work.y,
-        Side::Above => second <= work.y + work.height - target.height,
-    };
-    let y = if fits_first {
-        first
-    } else if fits_second {
-        second
-    } else {
-        // 两侧都放不下（工作区比窗口还矮）：夹进去，别让它跑到屏幕外。
-        clamp(first, work.y, work.y + work.height - target.height)
-    };
-    (x, y)
+/// 拖动时每像素都重排会让窗口抖成一片，而只节流不补发的话，松手那一刻的落点会
+/// 永远停在半路上。所以：**记下最后一次移动的时刻**，后台每 `POLL_INTERVAL`
+/// 看一次，连着 `FOLLOW_SETTLE` 没有新移动就排一次版 —— 拖动途中低频跟随，
+/// 停下后必然补上最终位置。
+#[derive(Clone, Default)]
+struct Follower(Arc<FollowState>);
+
+#[derive(Default)]
+struct FollowState {
+    last: std::sync::Mutex<Option<std::time::Instant>>,
+    waiting: std::sync::atomic::AtomicBool,
 }
 
-/// Puts the bubble under the pet, flipping above when the bottom edge would
-/// leave the monitor work area, and always keeps it inside that work area so it
-/// never lands off-screen at high DPI, on a second display, or on negative
-/// coordinates.
-fn place_bubble(pet: Rect, bubble: Rect, work: Rect, gap: i32) -> (i32, i32) {
-    place_beside(pet, bubble, work, gap, Side::Below)
+/// 后台多久看一眼。60ms：短到跟上拖动，长到不会空转。
+const POLL_INTERVAL: Duration = Duration::from_millis(60);
+/// 手停多久算停了。短到几乎察觉不到，长到不会在缓慢拖动时每动一点就重排一次。
+const FOLLOW_SETTLE: Duration = Duration::from_millis(140);
+
+impl Follower {
+    fn note(&self) {
+        *self.0.last.lock().unwrap() = Some(std::time::Instant::now());
+    }
+
+    /// 已经有人在等了吗？**是就别再起一个** —— 每个 `Moved` 事件都来一次，
+    /// 不设闸的话拖动一次会起几百个线程。
+    fn waiter_running(&self) -> bool {
+        self.0
+            .waiting
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// 手停够了吗？停够了就顺带交出「等待权」，让下一次拖动能再起一个线程。
+    fn settle(&self) -> Settle {
+        let settled = self
+            .0
+            .last
+            .lock()
+            .unwrap()
+            .map(|at| at.elapsed() >= FOLLOW_SETTLE)
+            .unwrap_or(true);
+        if !settled {
+            return Settle::Wait;
+        }
+        *self.0.last.lock().unwrap() = None;
+        self.0
+            .waiting
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        Settle::Now
+    }
 }
 
 /// 宠物所在显示器的可用区。拿不到就退回宠物自己那块：宁可摆在宠物旁边，
@@ -235,30 +217,100 @@ fn work_area_of(app: &AppHandle, pet: &WebviewWindow, pet_rect: Rect) -> Rect {
         .or(app.primary_monitor().ok().flatten())
         .map(|monitor| {
             let area = monitor.work_area();
-            Rect {
-                x: area.position.x,
-                y: area.position.y,
-                width: area.size.width as i32,
-                height: area.size.height as i32,
-            }
+            Rect::new(
+                area.position.x,
+                area.position.y,
+                area.size.width as i32,
+                area.size.height as i32,
+            )
         })
-        .unwrap_or(Rect {
-            x: pet_rect.x,
-            y: pet_rect.y,
-            width: pet_rect.width,
-            height: pet_rect.height,
-        })
+        .unwrap_or(pet_rect)
 }
 
 fn outer_rect(window: &WebviewWindow) -> Option<Rect> {
     let position = window.outer_position().ok()?;
     let size = window.outer_size().ok()?;
-    Some(Rect {
-        x: position.x,
-        y: position.y,
-        width: size.width as i32,
-        height: size.height as i32,
-    })
+    Some(Rect::new(
+        position.x,
+        position.y,
+        size.width as i32,
+        size.height as i32,
+    ))
+}
+
+/// 附属窗口的**唯一**摆法（D06）。对话条、摘要条、以及用户自己打开的插件页面
+/// 都在这里落位，因此不会出现「对话条会避让而摘要条不会」这种各写一份的情况。
+///
+/// 三步：把可见的附属窗口连同尺寸交给 `layout::arrange` 排（同侧首尾相接，翻面，
+/// 夹回工作区）；再把撞上插件页面的挪到候选位置里第一个空着的；最后落位。
+/// 插件页面是用户自己放的，**不去动它**，只让别的窗口绕开。
+fn relayout(app: &AppHandle) -> Result<(), String> {
+    let pet = app
+        .get_webview_window(PET)
+        .ok_or("pet window is missing")?;
+    let pet_rect = outer_rect(&pet).ok_or("pet window has no size yet")?;
+    let work = work_area_of(app, &pet, pet_rect);
+
+    // 只有可见的窗口参与排布。隐藏的对话条不该把摘要条挤到别处 —— 它下一刻
+    // 可能才被叫出来，而那时它该落在它自己的偏好位置上。
+    let mut items = Vec::new();
+    let mut plugin_windows = Vec::new();
+    for (label, prefer) in [(BUBBLE, Side::Below), (SUMMARY, Side::Above)] {
+        let Some(window) = app.get_webview_window(label) else {
+            continue;
+        };
+        if !window.is_visible().unwrap_or(false) {
+            continue;
+        }
+        let Ok(size) = window.outer_size() else {
+            continue;
+        };
+        let (width, height) = (size.width as i32, size.height as i32);
+        if width <= 0 || height <= 0 {
+            continue;
+        }
+        items.push(Placement::new(label, width, height, prefer));
+    }
+    for window in plugin::open_windows(app) {
+        if let Some(rect) = outer_rect(&window) {
+            plugin_windows.push(rect);
+        }
+    }
+
+    let planned = layout::arrange(pet_rect, &items, work, GAP);
+    let mut placed: Vec<Rect> = Vec::new();
+    for target in planned {
+        let Some(item) = items
+            .iter()
+            .find(|candidate| candidate.label == target.label)
+        else {
+            continue;
+        };
+        let Some(window) = app.get_webview_window(target.label) else {
+            continue;
+        };
+        // 摆在用户放好的插件页面上，两个都点不到。绕开它，而不是把它挪走 ——
+        // 那是用户自己放的位置。
+        let mut blockers: Vec<Rect> = plugin_windows.clone();
+        blockers.extend(placed.iter().copied());
+        let intent = Placement::new(
+            target.label,
+            item.width,
+            item.height,
+            item.prefer,
+        );
+        let at = layout::first_free(
+            &layout::candidates_around(pet_rect, &intent, work, GAP),
+            &blockers,
+            work,
+        )
+        .unwrap_or(Rect::new(target.x, target.y, item.width, item.height));
+        window
+            .set_position(PhysicalPosition::new(at.x, at.y))
+            .map_err(|error| error.to_string())?;
+        placed.push(at);
+    }
+    Ok(())
 }
 
 fn show_bubble(app: &AppHandle) -> Result<(), String> {
@@ -266,61 +318,19 @@ fn show_bubble(app: &AppHandle) -> Result<(), String> {
         .get_webview_window(BUBBLE)
         .ok_or("bubble window is missing")?;
     bubble.show().map_err(|error| error.to_string())?;
-    if let Some(pet) = app.get_webview_window(PET) {
-        if let (Some(pet_rect), Some((width, height))) = (
-            outer_rect(&pet),
-            bubble.outer_size().ok().map(|size| (size.width as i32, size.height as i32)),
-        ) {
-            if width > 0 && height > 0 {
-                let (x, y) = place_bubble(
-                    pet_rect,
-                    Rect {
-                        x: 0,
-                        y: 0,
-                        width,
-                        height,
-                    },
-                    work_area_of(app, &pet, pet_rect),
-                    GAP,
-                );
-                bubble
-                    .set_position(PhysicalPosition::new(x, y))
-                    .map_err(|error| error.to_string())?;
-            }
-        }
-    }
+    relayout(app)?;
     bubble.set_focus().map_err(|error| error.to_string())?;
     Ok(())
 }
 
-/// 摘要条默认落在宠物上方；上方放不下（比如宠物贴着屏幕顶端）就翻到下方。
-/// 焦点不抢：摘要是常驻的，一弹出来就把焦点抢走会让正在输入的对话条失手。
+/// 摘要条落位。焦点不抢：摘要是常驻的，一弹出来就把焦点抢走会让正在输入的
+/// 对话条失手。
 fn show_summary(app: &AppHandle) -> Result<(), String> {
-    let summary = app
-        .get_webview_window(SUMMARY)
-        .ok_or("summary window is missing")?;
-    summary.show().map_err(|error| error.to_string())?;
-    if let Some(pet) = app.get_webview_window(PET) {
-        if let (Some(pet_rect), Some(size)) = (outer_rect(&pet), summary.outer_size().ok())
-        {
-            let (x, y) = place_beside(
-                pet_rect,
-                Rect {
-                    x: 0,
-                    y: 0,
-                    width: size.width as i32,
-                    height: size.height as i32,
-                },
-                work_area_of(app, &pet, pet_rect),
-                GAP,
-                Side::Above,
-            );
-            summary
-                .set_position(PhysicalPosition::new(x, y))
-                .map_err(|error| error.to_string())?;
-        }
-    }
-    Ok(())
+    app.get_webview_window(SUMMARY)
+        .ok_or("summary window is missing")?
+        .show()
+        .map_err(|error| error.to_string())?;
+    relayout(app)
 }
 
 #[tauri::command]
@@ -374,11 +384,20 @@ fn hide_summary(app: AppHandle) -> Result<(), String> {
 /// 摘要条是展开还是收起。**由窗口高度回答**，不另存一份状态：高度是壳唯一
 /// 说了算的东西，界面照着它初始化，两边就不会各记一份然后慢慢走偏
 /// （D05 实机踩到：壳按参数把窗口撑高了，界面却还画着收起的样子）。
+///
+/// 比的是**物理高度**。`set_size` 收的是逻辑像素而 `outer_size` 回的是物理像素，
+/// 直接拿 96 这个逻辑常量去比，150% 的屏上会永远判成「已展开」—— 收起的摘要条
+/// 会被画成展开的样子，看着像面板被压扁了。
 fn summary_is_expanded(app: &AppHandle) -> bool {
-    app.get_webview_window(SUMMARY)
-        .and_then(|window| window.outer_size().ok())
-        .map(|size| size.height as f64 > SUMMARY_COLLAPSED_HEIGHT)
-        .unwrap_or(false)
+    let Some(window) = app.get_webview_window(SUMMARY) else {
+        return false;
+    };
+    let Ok(size) = window.outer_size() else {
+        return false;
+    };
+    let scale = window.scale_factor().unwrap_or(1.0);
+    // 两者之间那个 1.5 才是判据：收起是 96，展开是 420，差得很开。
+    size.height as f64 > SUMMARY_COLLAPSED_HEIGHT * scale * 1.5
 }
 
 /// 展开与收起改的是**窗口高度**，不是界面里的一个类。窗口不够高，面板会被裁掉
@@ -397,8 +416,9 @@ fn resize_summary(app: AppHandle, expanded: bool) -> Result<(), String> {
     summary
         .set_size(tauri::LogicalSize::new(SUMMARY_WIDTH, height))
         .map_err(|error| error.to_string())?;
-    // 不给焦点：摘要是常驻的，抢焦点会让正在输入的对话条失手。
-    let _ = show_summary(&app);
+    // 重新仲裁整组：变高之后它可能占掉对话条的位置，也可能自己放不下了。
+    // 只挪自己一个会留下一个压在它上面的对话条。
+    relayout(&app).inspect_err(|error| eprintln!("one: 改完摘要高度摆不好：{error}"))?;
     Ok(())
 }
 
@@ -434,7 +454,7 @@ fn start_drag(app: AppHandle, window: WebviewWindow) {
 
 /// Keyboard equivalent of dragging, in logical pixels so the shell converts them.
 #[tauri::command]
-fn move_window(window: WebviewWindow, dx: f64, dy: f64) -> Result<(), String> {
+fn move_window(app: AppHandle, window: WebviewWindow, dx: f64, dy: f64) -> Result<(), String> {
     let position = window.outer_position().map_err(|error| error.to_string())?;
     let scale = window.scale_factor().unwrap_or(1.0);
     window
@@ -442,7 +462,57 @@ fn move_window(window: WebviewWindow, dx: f64, dy: f64) -> Result<(), String> {
             position.x + (dx * scale).round() as i32,
             position.y + (dy * scale).round() as i32,
         ))
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    // 键盘移动宠物同样要带附属窗口：方向键连按十下之后，对话条还留在原处，
+    // 看着就像它没跟着动。
+    follow_pet(&app);
+    Ok(())
+}
+
+/// 宠物被拖动时，附属窗口要不要跟。
+///
+/// 拖动过程中每像素都重排会让窗口抖成一片（D06 实机可见），所以只**记下**
+/// 这次移动，等手停下来再排一次：停手 140ms 之后必然补上一次最终位置。
+/// 只做节流不做补发的话，松手那一刻的落点会永远停在半路上。
+fn follow_pet(app: &AppHandle) {
+    let Some(state) = app.try_state::<Follower>() else {
+        // 没有状态（理论上不会发生）就直接排一次，总比完全不跟强。
+        let _ = relayout(app);
+        return;
+    };
+    // 克隆的是内部那个 Arc，线程要用 'static 的那份 —— 不能借用 State。
+    let state = state.inner().clone();
+    state.note();
+    if state.waiter_running() {
+        return;
+    }
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(POLL_INTERVAL);
+            // 还没静够就**继续等**，而不是退出 —— 这里曾经写反过：不静够
+            // 直接 break，于是后台线程在 note 之后的第一个 tick 就退了，
+            // 拖动跟随一次都不发生（实机抓到：日志有「宠物移动了」，但一次
+            // 仲裁都没发生，附属窗口原地不动）。
+            match state.settle() {
+                Settle::Wait => continue,
+                Settle::Now => {
+                    if let Err(error) = relayout(&handle) {
+                        eprintln!("one: 宠物动过之后没摆好附属窗口：{error}");
+                    }
+                    return;
+                }
+            }
+        }
+    });
+}
+
+/// 手停够了吗。这个区分必须有：**「还没停」是继续等，「停了」是排版收工**，
+/// 两件事撞在一个布尔上就会写反（实机踩过）。
+#[derive(Debug, PartialEq, Eq)]
+enum Settle {
+    Wait,
+    Now,
 }
 
 #[tauri::command]
@@ -512,6 +582,13 @@ fn open_plugin_arg() -> Option<String> {
 /// 而无边框置顶窗口在 Windows 上常常拿不到键盘焦点（Tab / Enter 同样打不进去）。
 fn open_summary_arg() -> bool {
     std::env::args().any(|arg| arg == "--open-summary")
+}
+
+/// `--open-bubble`：启动后直接亮出对话条。摘要条有 `--open-summary` 配对，
+/// 三条附属窗口同时在场的布局（互不遮挡）才能在验收时被看见 —— 而「都在」正是
+/// 那种布局最需要被看见的时候。
+fn open_bubble_arg() -> bool {
+    std::env::args().any(|arg| arg == "--open-bubble")
 }
 
 /// `--expand-summary`：启动时就把摘要条展开。展开要经壳改窗口高度，因此这是一条
@@ -852,6 +929,7 @@ fn main() {
     plugin::install(tauri::Builder::default())
         .manage(identity)
         .manage(plugin::PluginWindows::default())
+        .manage(Follower::default())
         .setup(move |app| {
             let handle = app.handle().clone();
             // 顺序很重要。先装好本体桥接，再开窗：窗口一创建，页面就会立刻调用
@@ -878,6 +956,17 @@ fn main() {
             if let Err(error) = install_menu(&handle, client) {
                 eprintln!("one: 安装菜单失败：{error}");
             }
+            // 鼠标拖宠物时，附属窗口要跟。方向键那条路走 move_window 命令，
+            // 鼠标这条只能靠窗口移动事件 —— 拖动是系统做的，我们收不到命令。
+            let follow = handle.clone();
+            if let Some(pet) = handle.get_webview_window(PET) {
+                pet.on_window_event(move |event| {
+                    if matches!(event, tauri::WindowEvent::Moved(_)) {
+                        eprintln!("one: 宠物移动了，重新摆附属窗口");
+                        follow_pet(&follow);
+                    }
+                });
+            }
             // `--open-plugin=<provider>` 直接开一个插件页面。调试插件与验收都
             // 需要一条不靠鼠标的路：页面加载成功与否完全体现在下面的日志里。
             if let Some(provider) = open_plugin_arg() {
@@ -888,6 +977,13 @@ fn main() {
             if open_summary_arg() {
                 if let Err(error) = show_summary(&handle) {
                     eprintln!("one: 摘要条没有打开：{error}");
+                }
+            }
+            // 顺序有讲究：对话条在摘要条**之后**开，仲裁才会看到两个都在场。
+            // 那是「不互相遮挡」唯一有意义的时刻 —— 只开一个时它无处可撞。
+            if open_bubble_arg() {
+                if let Err(error) = show_bubble(&handle) {
+                    eprintln!("one: 对话条没有打开：{error}");
                 }
             }
             // 高度必须**在建窗时**就定下来：界面一挂载就问壳自己多高，
@@ -956,126 +1052,31 @@ fn main() {
 mod tests {
     use super::*;
 
-    #[test]
-    fn opens_under_the_pet() {
-        let (x, y) = place_bubble(
-            Rect { x: 1000, y: 100, width: 128, height: 128 },
-            Rect { x: 0, y: 0, width: 380, height: 168 },
-            Rect { x: 0, y: 0, width: 1920, height: 1040 },
-            12,
-        );
-        assert_eq!(x, 874);
-        assert_eq!(y, 240);
-    }
 
     #[test]
-    fn flips_above_when_the_bottom_edge_would_leave_the_work_area() {
-        let (x, y) = place_bubble(
-            Rect { x: 900, y: 900, width: 128, height: 128 },
-            Rect { x: 0, y: 0, width: 380, height: 168 },
-            Rect { x: 0, y: 0, width: 1920, height: 1040 },
-            12,
-        );
-        assert_eq!(x, 774);
-        assert_eq!(y, 720);
-    }
-
-    #[test]
-    fn keeps_the_window_inside_the_work_area_on_a_second_display() {
-        let work = Rect { x: 1920, y: -200, width: 1280, height: 1000 };
-        let (x, y) = place_bubble(
-            Rect { x: 3100, y: 700, width: 128, height: 128 },
-            Rect { x: 0, y: 0, width: 380, height: 168 },
-            work,
-            12,
-        );
-        assert!(x >= work.x && x + 380 <= work.x + work.width);
-        assert!(y >= work.y && y + 168 <= work.y + work.height);
-    }
-
-    #[test]
-    fn clamps_a_pet_that_was_dragged_off_the_right_edge() {
-        let work = Rect { x: 0, y: 0, width: 1280, height: 800 };
-        let (x, y) = place_bubble(
-            Rect { x: 1260, y: 600, width: 128, height: 128 },
-            Rect { x: 0, y: 0, width: 380, height: 168 },
-            work,
-            12,
-        );
-        assert_eq!(x, 900);
-        assert_eq!(y, 420);
-    }
-
-    #[test]
-    fn survives_a_work_area_smaller_than_the_bubble() {
-        let (x, y) = place_bubble(
-            Rect { x: 10, y: 10, width: 128, height: 128 },
-            Rect { x: 0, y: 0, width: 380, height: 168 },
-            Rect { x: 0, y: 0, width: 320, height: 200 },
-            12,
-        );
-        assert_eq!((x, y), (0, 32));
-    }
-
-    #[test]
-    fn the_summary_sits_above_the_pet_and_flips_down_when_it_cannot() {
-        // 摘要条是常驻的，压在宠物上面才不会被宠物挡住；宠物贴着屏幕顶端时
-        // 上方放不下，就得翻到下面，而不是跑到屏幕外。
-        let pet = Rect { x: 1000, y: 300, width: 128, height: 128 };
-        let summary = Rect { x: 0, y: 0, width: 360, height: 96 };
-        let work = Rect { x: 0, y: 0, width: 1920, height: 1040 };
-        assert_eq!(
-            place_beside(pet, summary, work, 12, Side::Above),
-            (884, 192)
-        );
-        let low = Rect { x: 1000, y: 40, width: 128, height: 128 };
-        assert_eq!(
-            place_beside(low, summary, work, 12, Side::Above),
-            (884, 180),
-            "上方 40 - 96 - 12 < 0，应当翻到下面：40 + 128 + 12 = 180"
+    fn the_follower_waits_for_the_hand_to_stop_before_it_lays_out() {
+        // 拖动跟随的判据（实机抓到的坑就在这里）：
+        // 「还没停」是**继续等**，「停了」才排版收工。这两件事一旦撞进一个
+        // 布尔值就会写反 —— 反了之后后台线程在第一次 tick 就退出，
+        // 日志里看得见「宠物移动了」，却一次仲裁都没发生。
+        let follower = Follower::default();
+        follower.note();
+        assert_eq!(follower.settle(), Settle::Wait, "刚动过就说不稳");
+        assert!(!follower.waiter_running(), "第一次来的人起线程");
+        assert!(follower.waiter_running(), "别再起第二个线程");
+        std::thread::sleep(FOLLOW_SETTLE + std::time::Duration::from_millis(30));
+        assert_eq!(follower.settle(), Settle::Now, "停够了就该排版");
+        assert!(
+            !follower.waiter_running(),
+            "排完把等待权交出去，下一次拖动能再起线程"
         );
     }
 
     #[test]
-    fn the_summary_stays_inside_the_work_area_on_a_second_display() {
-        let work = Rect { x: 1920, y: -200, width: 1280, height: 1000 };
-        let pet = Rect { x: 3100, y: 700, width: 128, height: 128 };
-        let summary = Rect { x: 0, y: 0, width: 360, height: 420 };
-        let (x, y) = place_beside(pet, summary, work, 12, Side::Above);
-        assert!(x >= work.x && x + 360 <= work.x + work.width);
-        assert!(y >= work.y && y + 420 <= work.y + work.height);
-    }
-
-    #[test]
-    fn the_expanded_summary_is_taller_than_the_collapsed_one() {
-        // 展开高度不够的话，被裁掉的正好是数据 —— 看起来就像「日程丢了」。
-        assert!(SUMMARY_EXPANDED_HEIGHT > SUMMARY_COLLAPSED_HEIGHT);
-        // 收起时要放得下一句话加一行凭据，别一打开就是滚动条。
-        assert!(SUMMARY_COLLAPSED_HEIGHT >= 80.0);
-    }
-
-    #[test]
-    fn both_attached_windows_share_one_placement_rule() {
-        // 对话条与摘要条是同一类附属窗口，规则只有一份（place_beside）：放得下就在
-        // 偏好的一侧，放不下才翻面，两侧都放不下才夹进工作区。
-        let strip = Rect { x: 0, y: 0, width: 360, height: 96 };
-        let work = Rect { x: 0, y: 0, width: 1920, height: 1040 };
-        // 判定看的是**整条放不放得下**：y = 1040 时底边到 1136，超出工作区 96。
-        let low = Rect { x: 900, y: 900, width: 128, height: 128 };
-        assert_eq!(
-            place_beside(low, strip, work, 12, Side::Below).1,
-            792,
-            "下面放不下（1040 + 96 > 1040），翻到上面"
-        );
-        assert_eq!(
-            place_beside(low, strip, work, 12, Side::Above).1,
-            792,
-            "摘要条本来就想在上面，不用翻"
-        );
-        // 宠物在中间偏上时两者才分得开：下面放得下就往下，摘要条仍然往上。
-        let mid = Rect { x: 900, y: 300, width: 128, height: 128 };
-        assert_eq!(place_beside(mid, strip, work, 12, Side::Below).1, 440);
-        assert_eq!(place_beside(mid, strip, work, 12, Side::Above).1, 192);
+    fn settling_takes_longer_than_one_poll_tick() {
+        // 60ms 一查、140ms 才算停：至少查两轮才可能停。太近的话慢速拖动
+        // 时会每动一点就重排一次，窗口抖成一片。
+        assert!(POLL_INTERVAL < FOLLOW_SETTLE);
     }
 
     #[test]
