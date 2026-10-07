@@ -1,3 +1,4 @@
+export * from './abort.ts';
 export * from './errors.ts';
 export * from './domain.ts';
 export * from './localtime.ts';
@@ -135,7 +136,19 @@ export interface ConversationRuntime {
  * 没有这条边界时，「模拟回复」和「会话状态机」是同一个东西，于是换个真实模型
  * 就等于把会话历史一起换掉 —— 而对话是 ONE 自己的数据。
  *
- * `draft` 是可选的：交回来就落一条待确认的提议（ADR-022），不交就只是回一句话。
+ * **`content` 是异步生成器，不是一段字符串**（ADR-031）。0.2 的模拟回复是「拿完整
+ * 一句，再用定时器逐字打出来」—— 那是假流式：字全在本地，只是放慢了给人看。
+ * 真模型的内容是一边收一边出来的，所以端口必须能**一段一段交出来**，否则接真模型
+ * 就得把状态机整个重写一遍。模拟 Agent 用只 yield 一次的生成器实现，一套状态机
+ * 两种实现，运行时不必判断「这个 Agent 支不支持流式」。
+ *
+ * `draft` 仍在拿到流之前就给：它来自**解析用户那句话**（「明天下午三点面试」→ 一份
+ * 日程草稿），不来自模型答了什么，所以不必等流完。真实模型起草是另一回事
+ * （走模型的 tool use），ADR-031 把它排在流式之后。
+ *
+ * `signal` 是**取消的唯一可靠通道**（ADR-031）。别指望调用方拿到生成器再 `.return()`
+ * 就够了：生成器正挂在一次 `await` 上时，return 请求排在 pending 的 `next` 后面，
+ * 那一次 `yield` 一定会先吐出来 —— 想「点了停止就立刻不交内容」，得靠它醒来。
  */
 export interface ReplyAgent {
   readonly id: AgentId;
@@ -144,8 +157,10 @@ export interface ReplyAgent {
     text: string;
     /** 上一条 assistant 回复。笔记的「把刚才那段记下来」要靠它。 */
     lastReply: string | undefined;
+    /** 用户点了「停止回复」。实现要在**每段之间**看它，并保证收到后一个字都不再交。 */
+    signal?: AbortSignal;
   }): Promise<{
-    content: string;
+    content: AsyncIterable<string>;
     draft?: { domain: ProposalDomain; draft: Proposal['draft'] };
   }>;
 }

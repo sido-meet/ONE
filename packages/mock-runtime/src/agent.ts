@@ -1,4 +1,4 @@
-import { ClientError } from '../../contracts/src/index.ts';
+import { ClientError, sleep } from '../../contracts/src/index.ts';
 import type {
   AgentId,
   ErrorCode,
@@ -96,28 +96,54 @@ function takeInjectedFault(): ErrorCode | undefined {
  * 三个模拟 Agent。它们行为一样，只有名字不同 —— 名字会出现在回复里，用户得能看出
  * 「这句是谁说的」，而这正是切换 Agent 要验证的东西。
  */
-export function createMockAgents(): ReplyAgent[] {
+export function createMockAgents(tickMs = 28): ReplyAgent[] {
   return agentCatalog.map(({ id, name }) => ({
     id,
     name,
-    async reply({ text, lastReply }) {
+    async reply({ text, lastReply, signal }) {
       const attempt = draftOf(text, lastReply);
       // 注入排在解析之后：要让「这句话 ONE 收不了」原样成立。
       const injected = takeInjectedFault();
       if (injected) throw new ClientError(injected, '注入的模拟故障');
-      if (attempt.kind === 'draft') {
-        return {
-          content: `我按“${text}”起草了一条${attempt.domain === 'calendar' ? '日程' : '笔记'}，确认后才会写进去。`,
-          draft: { domain: attempt.domain, draft: attempt.draft },
-        };
-      }
-      return {
-        // 差一句就说差哪一句，别拿模拟回复把话头岔开；闲聊就老实说是闲聊。
-        content:
-          attempt.kind === 'incomplete'
+      const content =
+        attempt.kind === 'draft'
+          ? `我按“${text}”起草了一条${attempt.domain === 'calendar' ? '日程' : '笔记'}，确认后才会写进去。`
+          : // 差一句就说差哪一句，别拿模拟回复把话头岔开；闲聊就老实说是闲聊。
+            attempt.kind === 'incomplete'
             ? attempt.hint
-            : `这是 ${name} 的模拟回复。你说：“${text}”。\n\n这段历史保存在同一个 ONE 对话里。回复结束后，你可以切换 Agent 继续体验。真实 AI 将在后续阶段接入。`,
+            : `这是 ${name} 的模拟回复。你说：“${text}”。\n\n这段历史保存在同一个 ONE 对话里。回复结束后，你可以切换 Agent 继续体验。真实 AI 将在后续阶段接入。`;
+      return {
+        content: typed(content, tickMs, signal),
+        ...(attempt.kind === 'draft'
+          ? { draft: { domain: attempt.domain, draft: attempt.draft } }
+          : {}),
       };
     },
   }));
+}
+
+/**
+ * 逐字交出去 —— **打字机节奏归模拟 Agent，不归运行时**（ADR-031）。
+ *
+ * 「怎么显示」和「Agent 说了什么」是两件事。以前节奏写在运行时的 `setInterval` 里，
+ * 于是运行时必须知道对面是不是模拟的；而真模型的内容是一段段到的，那种定时器只会
+ * 把它们重新排一遍序。放在这一层之后，真模型按网络节奏 yield，同一套显示逻辑照用。
+ *
+ * 一次三个字是模拟 Agent 自己的观感，不是协议要求。
+ *
+ * **`signal` 要真的掐断等待**（ADR-031），不能只在两次 `yield` 之间瞄一眼：正挂在
+ * 那次等待上时，用户按停止，那一段仍会吐出来 —— 契约测试「取消之后 Agent 不再交
+ * 内容」守的就是这个差别。
+ */
+async function* typed(
+  text: string,
+  tickMs: number,
+  signal?: AbortSignal,
+): AsyncIterable<string> {
+  const chars = Array.from(text);
+  for (let at = 0; at < chars.length; at += 3) {
+    await sleep(tickMs, signal);
+    if (signal?.aborted) return;
+    yield chars.slice(at, at + 3).join('');
+  }
 }

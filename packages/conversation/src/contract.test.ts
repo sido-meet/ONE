@@ -9,6 +9,7 @@ import {
 } from './store-sqlite.ts';
 import type { ConversationDatabase } from './store-sqlite.ts';
 import { createConversationRuntime } from './runtime.ts';
+import { sleep } from '../../contracts/src/index.ts';
 import type {
   ConversationStore,
   ReplyAgent,
@@ -189,26 +190,39 @@ describe.each(implementations)('会话存储契约（$name）', ({ make }) => {
  * 契约表里 —— 它本来就只有一份实现，不是两份实现的共同行为。
  */
 describe('本体重启后正在跑的回复', () => {
+  /**
+   * **永不结束**的回复。
+   *
+   * 以前写的是「一整句超长的字符串」，靠运行时的定时器一直切下去才显得没完 —— 现在
+   * 改成真的永不结束的生成器：表达的是同一件事，但不再依赖「运行时会不会替它打字」。
+   */
   const agent: ReplyAgent = {
     id: 'chat',
     name: 'Chat Agent',
-    async reply() {
-      // 永不结束的回复：只要有定时器在跑，Run 就是 running。
-      return { content: '很长很长的一段回复'.repeat(200) };
+    async reply({ signal }) {
+      return { content: forever(signal) };
     },
   };
+
+  async function* forever(signal?: AbortSignal): AsyncIterable<string> {
+    for (;;) {
+      await sleep(5, signal);
+      if (signal?.aborted) return;
+      yield '很长很长的一段回复';
+    }
+  }
 
   it('回来是 interrupted，不是 running 也不是 completed', async () => {
     vi.useFakeTimers();
     try {
       const store = createMemoryStore({ conversations: [WELCOME] });
-      const runtime = createConversationRuntime(store, [agent], { tickMs: 1 });
+      const runtime = createConversationRuntime(store, [agent]);
       await runtime.sendMessage('welcome', '说点什么');
       expect(
         runtime.getSnapshot().runs.some((item) => item.status === 'running'),
       ).toBe(true);
 
-      const reopened = createConversationRuntime(store, [agent], { tickMs: 1 });
+      const reopened = createConversationRuntime(store, [agent]);
       const runs = reopened.getSnapshot().runs;
       expect(runs).toHaveLength(1);
       expect(runs[0]!.status).toBe('interrupted');
@@ -223,12 +237,12 @@ describe('本体重启后正在跑的回复', () => {
     vi.useFakeTimers();
     try {
       const store = createMemoryStore({ conversations: [WELCOME] });
-      const runtime = createConversationRuntime(store, [agent], { tickMs: 1 });
+      const runtime = createConversationRuntime(store, [agent]);
       await runtime.sendMessage('welcome', '说点什么');
       // 流出一点再「崩」：半截只该活在内存里。
       await vi.advanceTimersByTimeAsync(20);
 
-      const reopened = createConversationRuntime(store, [agent], { tickMs: 1 });
+      const reopened = createConversationRuntime(store, [agent]);
       const replies = reopened
         .getSnapshot()
         .events.filter((event) => event.type === 'message.created')
@@ -246,10 +260,10 @@ describe('本体重启后正在跑的回复', () => {
     vi.useFakeTimers();
     try {
       const store = createMemoryStore({ conversations: [WELCOME] });
-      const first = createConversationRuntime(store, [agent], { tickMs: 1 });
+      const first = createConversationRuntime(store, [agent]);
       await first.sendMessage('welcome', '说点什么');
 
-      const second = createConversationRuntime(store, [agent], { tickMs: 1 });
+      const second = createConversationRuntime(store, [agent]);
       const seqs = second
         .getSnapshot()
         .events.filter((event) => event.conversationId === 'welcome')
@@ -257,7 +271,7 @@ describe('本体重启后正在跑的回复', () => {
       expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
       expect(new Set(seqs).size).toBe(seqs.length);
       // 关掉再开两次，不该每次都多一条 run.finished。
-      const third = createConversationRuntime(store, [agent], { tickMs: 1 });
+      const third = createConversationRuntime(store, [agent]);
       expect(
         third
           .getSnapshot()
@@ -266,6 +280,95 @@ describe('本体重启后正在跑的回复', () => {
       third.dispose();
       second.dispose();
       first.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+/**
+ * 「停止回复」得**真的停掉传输**（ADR-031）。
+ *
+ * 界面不再显示，很容易做到；难的是对面还在接着收 token —— 用户按了停止，省下来的
+ * 流量和等待却都是假的，接真模型之后那更是白花的钱。所以这里不看界面，只数 Agent
+ * 交了多少次手：取消之后这个数必须**不再涨**。
+ *
+ * 这条判据在把 `finish` 里的 `iterator.return?.()` 去掉之后是红的（数会一直涨）。
+ */
+describe('停止回复要停掉传输', () => {
+  it('取消之后 Agent 不再交内容', async () => {
+    vi.useFakeTimers();
+    try {
+      const store = createMemoryStore({ conversations: [WELCOME] });
+      let handed = 0;
+      const counting: ReplyAgent = {
+        id: 'chat',
+        name: 'Chat Agent',
+        async reply({ signal }) {
+          return { content: counted(signal) };
+        },
+      };
+      async function* counted(signal?: AbortSignal): AsyncIterable<string> {
+        for (;;) {
+          await sleep(5, signal);
+          if (signal?.aborted) return;
+          handed++;
+          yield '还在说';
+        }
+      }
+
+      const runtime = createConversationRuntime(store, [counting]);
+      const run = await runtime.sendMessage('welcome', '说点什么');
+      await vi.advanceTimersByTimeAsync(12);
+      expect(handed).toBeGreaterThan(0);
+
+      const before = handed;
+      await runtime.cancelRun(run.id);
+      // 判据是「**一个都不许再交**」，不是「交完就停」。
+      //
+      // 后者两种实现都满足：不调 `iterator.return()` 时，循环会在下一次 next() 发现
+      // drafts 没了而 break，生成器同样不再往下走 —— 于是一条看着在守规矩的测试，
+      // 在真的坏代码上照样是绿的（试过）。差别只在**多交了几次**：return() 让生成器
+      // 在恢复点立刻结束，一个字都不再吐；不调的话它还会完成手上那一次。
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(handed).toBe(before);
+      runtime.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('半截内容不落历史 —— 没说完的话不是他说过的话', async () => {
+    vi.useFakeTimers();
+    try {
+      const store = createMemoryStore({ conversations: [WELCOME] });
+      const counting: ReplyAgent = {
+        id: 'chat',
+        name: 'Chat Agent',
+        async reply({ signal }) {
+          return { content: counted(signal) };
+        },
+      };
+      async function* counted(signal?: AbortSignal): AsyncIterable<string> {
+        for (;;) {
+          await sleep(5, signal);
+          if (signal?.aborted) return;
+          yield '还在说';
+        }
+      }
+      const runtime = createConversationRuntime(store, [counting]);
+      const run = await runtime.sendMessage('welcome', '说点什么');
+      await vi.advanceTimersByTimeAsync(12);
+      await runtime.cancelRun(run.id);
+
+      const replies = runtime
+        .getSnapshot()
+        .events.filter((event) => event.type === 'message.created')
+        .filter((event) => event.message.role === 'assistant');
+      expect(replies).toHaveLength(0);
+      expect(runtime.getSnapshot().runs[0]?.status).toBe('cancelled');
+      expect(run.id).toBeTruthy();
+      runtime.dispose();
     } finally {
       vi.useRealTimers();
     }

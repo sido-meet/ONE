@@ -12,7 +12,7 @@ describe('ONE conversation boundary', () => {
     vi.useFakeTimers();
     client = createMemoryRuntime();
     await client.sendMessage('welcome', '你好');
-    vi.runAllTimers();
+    await vi.runAllTimersAsync();
     await client.changeAgent('welcome', 'claude-code');
     const state = client.getSnapshot();
     expect(state.conversations[0]?.id).toBe('welcome');
@@ -38,7 +38,7 @@ describe('ONE conversation boundary', () => {
     await client.cancelRun(run.id);
     await client.cancelRun(run.id);
     const before = client.getSnapshot();
-    vi.runAllTimers();
+    await vi.runAllTimersAsync();
     expect(client.getSnapshot()).toEqual(before);
     expect(before.runs[0]?.status).toBe('cancelled');
     expect(
@@ -51,7 +51,7 @@ describe('ONE conversation boundary', () => {
     client = createMemoryRuntime();
     const other = await client.createConversation('独立对话');
     await client.sendMessage(other.id, '第二个对话');
-    vi.runAllTimers();
+    await vi.runAllTimersAsync();
     const snapshot = client.getSnapshot();
     snapshot.events.length = 0;
     expect(client.getSnapshot().events).toHaveLength(4);
@@ -91,7 +91,7 @@ describe('一句话的三种结果', () => {
     vi.useFakeTimers();
     client = createMemoryRuntime();
     await client.sendMessage('welcome', text);
-    vi.runAllTimers();
+    await vi.runAllTimersAsync();
     const snapshot = client.getSnapshot();
     const replies = snapshot.events
       .filter((event) => event.type === 'message.created')

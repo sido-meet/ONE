@@ -40,7 +40,7 @@ export function createMemoryRuntime(
         },
       ],
     }),
-    options.agents ?? createMockAgents(),
-    { tickMs: options.tickMs },
+    // 节奏传给模拟 Agent 自己（ADR-031）：它决定怎么逐字交，运行时只管消费。
+    options.agents ?? createMockAgents(options.tickMs),
   );
 }
