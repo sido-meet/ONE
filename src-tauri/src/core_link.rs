@@ -31,6 +31,266 @@ const POLL_MAX: Duration = Duration::from_millis(50);
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// 同一根管道要同时供本体、宠物和桌面端使用，所以路径不随客户端变化。
 const CORE_ENTRY: &str = "core/src/index.ts";
+/// 可分发产物的目录名与清单文件名。清单是壳的唯一依据：靠猜会猜错。
+const RUNTIME_DIR: &str = "dist-runtime";
+const RUNTIME_MANIFEST: &str = "core-runtime.json";
+
+/// 本体该怎么起来。这是 R02 之后**唯一**一处决定本体进程的东西。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoreRuntime {
+    /// 发布产物：自带 node，指哪跑哪，不依赖机器上有没有装 node。
+    Bundled { node: PathBuf, entry: PathBuf, root: PathBuf },
+    /// 开发环境：仓库里跑源码，用系统 node。开发时这条路才真的好用 ——
+    /// 改一行源码就能生效，不用重新打包。
+    Source { node: String, entry: PathBuf, root: PathBuf },
+}
+
+/// 本体不可用的原因。**要原样透给用户**，不能压成一句「没接上」——
+/// 「产物缺失」和「node 没装」该做的事完全不同（ADR-021）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoreUnavailable {
+    /// 既没有产物，也不是在仓库里 —— 缺了一个该由构建补上的东西。
+    NoRuntime { searched: Vec<PathBuf> },
+    /// 找到了产物目录但清单不完整：构建没跑完或被人动过。
+    BrokenManifest { at: PathBuf, reason: String },
+}
+
+impl CoreUnavailable {
+    /// 用户会看到的一句话。**「找过哪儿」要真的列出来**：漏打包的机器上，
+    /// 只说「找不到本体」等于让用户猜；只列源码路径又会让人以为是源码坏了。
+    fn describe(&self) -> String {
+        match self {
+            CoreUnavailable::NoRuntime { searched } => {
+                let mut text = String::from("找不到 ONE 本体：既没有可分发产物，也没有源码。找过：");
+                if searched.is_empty() {
+                    text.push_str("（没有任何可查的位置）");
+                } else {
+                    for path in searched {
+                        text.push(' ');
+                        text.push_str(&path.display().to_string());
+                        text.push('；');
+                    }
+                }
+                text.push_str("在 ONE 仓库里运行 pnpm core:package 生成产物");
+                text
+            }
+            CoreUnavailable::BrokenManifest { at, reason } => {
+                format!(
+                    "本体产物不可用（{}）：{reason}。请重新运行 pnpm core:package",
+                    at.display()
+                )
+            }
+        }
+    }
+}
+
+/// 从清单读出一个可用的本体运行时。清单字段是**敌意输入**：它由构建写出，也可能
+/// 被改坏，因此路径必须在产物目录之内，不能让它指向别处。
+fn read_manifest(root: &std::path::Path) -> Result<CoreRuntime, CoreUnavailable> {
+    let broken = |reason: &str| CoreUnavailable::BrokenManifest {
+        at: root.to_path_buf(),
+        reason: reason.to_string(),
+    };
+    let text = std::fs::read_to_string(root.join(RUNTIME_MANIFEST))
+        .map_err(|error| broken(&format!("读不到清单：{error}")))?;
+    let value: Value = serde_json::from_str(&text).map_err(|error| broken(&format!("清单不是合法 JSON：{error}")))?;
+    let node = value.get("nodeExe").and_then(Value::as_str).unwrap_or_default();
+    let entry = value.get("entry").and_then(Value::as_str).unwrap_or_default();
+    if node.is_empty() || entry.is_empty() {
+        return Err(broken("清单缺 nodeExe 或 entry"));
+    }
+    let inside = |relative: &str| -> Result<PathBuf, CoreUnavailable> {
+        let full = root.join(relative);
+        // 清单里的路径必须在产物目录之内。清单来自磁盘，磁盘上的东西不可信。
+        let relative_to_root = full
+            .strip_prefix(root)
+            .map_err(|_| broken("清单里的路径跑出了产物目录"))?;
+        if relative_to_root.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::RootDir
+            )
+        }) {
+            return Err(broken("清单里的路径含有 .. 或盘符"));
+        }
+        Ok(full)
+    };
+    let node_path = inside(node)?;
+    if !node_path.is_file() {
+        return Err(broken("清单指向的 node 不存在"));
+    }
+    let entry_path = inside(entry)?;
+    if !entry_path.is_file() {
+        return Err(broken("清单指向的本体入口不存在"));
+    }
+    Ok(CoreRuntime::Bundled {
+        node: node_path,
+        entry: entry_path,
+        root: root.to_path_buf(),
+    })
+}
+
+/// 找一个能跑本体的运行时：先找发布产物，再找开发仓库。
+///
+/// 发布版**不会**静默退回系统 node —— 漏打包的机器必须在界面上看见原因，
+/// 而不是表现成「本体没接上」然后把问题藏到用户查不到的地方（ADR-021）。
+pub fn find_core() -> Result<CoreRuntime, CoreUnavailable> {
+    let mut roots = Vec::new();
+    // 产物：跟着 exe 走，也允许显式指定（Tauri 打包时资源目录名可能带版本）。
+    if let Ok(explicit) = std::env::var("ONE_CORE_RUNTIME") {
+        roots.push(PathBuf::from(explicit));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            roots.push(dir.to_path_buf());
+            if let Some(up) = dir.parent() {
+                roots.push(up.to_path_buf());
+            }
+        }
+    }
+    find_core_in_with(&roots, repo_root)
+}
+
+/// 搜索根显式传进来，便于测试「哪儿都没有」与「产物优先」那两条。`repo` 是仓库查找
+/// 函数，测试传自己的实现，因此结果不依赖测试机自己所在的位置。
+fn find_core_in_with(
+    roots: &[PathBuf],
+    repo: impl FnOnce() -> Result<PathBuf, String>,
+) -> Result<CoreRuntime, CoreUnavailable> {
+    let mut searched = Vec::new();
+    for root in roots {
+        let candidate = root.join(RUNTIME_DIR);
+        searched.push(candidate.clone());
+        if candidate.join(RUNTIME_MANIFEST).is_file() {
+            return read_manifest(&candidate);
+        }
+    }
+    // 开发环境回退：仓库里跑源码，用系统 node。只有真的找得到源码才走这条。
+    match repo() {
+        Ok(root) if root.join(CORE_ENTRY).exists() => Ok(CoreRuntime::Source {
+            node: "node".to_string(),
+            entry: root.join(CORE_ENTRY),
+            root,
+        }),
+        _ => {
+            // 产物目录一定要出现在「找过」里。漏打包的机器上，用户能做的第一件事
+            // 就是去确认 dist-runtime 在不在 —— 不说，用户就只能猜。
+            if !searched.iter().any(|path| path.ends_with(RUNTIME_DIR)) {
+                searched.push(PathBuf::from(RUNTIME_DIR));
+            }
+            searched.push(PathBuf::from(CORE_ENTRY));
+            Err(CoreUnavailable::NoRuntime { searched })
+        }
+    }
+}
+
+/// 记下「本体起不来」，并把状态推给**已经挂着**的窗口。
+///
+/// 三个失败点在同一条纪律下（ADR-021）：找不到运行时、清单坏了、node 拉不起来。
+/// 只 `eprintln!` 等于把原因藏进日志 —— 用户界面上仍然只剩「本体没有连接」，
+/// 而他真正需要的是「文件被安全软件拦了」还是「漏打包」。`emit` 也是必需的：
+/// `RestartCore` 与 `launch_through_core` 都发生在窗口已经画出来之后，只往 link
+/// 里存一份，已挂载的窗口不会重画。
+fn note_core_problem(app: &AppHandle, text: String) {
+    let Some(link) = app.try_state::<CoreLink>() else {
+        eprintln!("one: 本体不可用：{text}");
+        return;
+    };
+    link.note_core_problem(text.clone());
+    let status = link.status();
+    drop(link);
+    eprintln!("one: 本体不可用：{text}");
+    let _ = app.emit("core:status", status);
+}
+
+/// 启动本体。宠物是默认安装的那个客户端，但两端都需要它活着。
+///
+/// 失败时把原因**存进 link 并通知界面**而不只是打日志：用户也要看见
+/// （ADR-021）。收 `AppHandle` 而不是 `&CoreLink`/`State`，是因为下面那条
+/// 线程里的 `spawn` 失败也要走同一条通知路径。
+pub fn start_core(app: &AppHandle) -> Result<(), String> {
+    // 打包后的 exe 可能在任意目录启动，因此不依赖当前工作目录。
+    let runtime = match find_core() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            let text = reason.describe();
+            note_core_problem(app, text.clone());
+            return Err(text);
+        }
+    };
+    let app = app.clone();
+    // 用了哪一份 node 必须看得见。「本体没接上」有两种截然不同的成因 ——
+    // 产物里的 node 与系统 node —— 只看现象分不出来（ADR-021）。
+    eprintln!(
+        "one: 本体运行时：{}（{}），工作目录 {}",
+        runtime.entry().display(),
+        runtime.node().display(),
+        runtime.root().display()
+    );
+    thread::spawn(move || {
+        let mut command = std::process::Command::new(&runtime.node());
+        command
+            .arg(&runtime.entry())
+            .current_dir(runtime.root())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        // 客户端本身是 GUI 子系统（不弹控制台），而 node 是控制台程序：父进程
+        // 没有控制台时，Windows 会给它新分配一个，于是每开一次宠物就闪一个黑框。
+        // CREATE_NO_WINDOW 让本体在后台安静地跑，日志仍然走 stderr 转发。
+        command.creation_flags(CREATE_NO_WINDOW);
+        let Ok(mut child) = command.spawn() else {
+            // 找得到文件却拉不起来，通常是安全软件把它隔离了，或者权限被改。
+            // 这两种都不该表现成「本体没有连接」。
+            note_core_problem(
+                &app,
+                format!(
+                    "本体拉不起来：{} 存在但无法执行。检查安全软件是否隔离了它，\
+                     或换一个位置后重试「重启本体」",
+                    runtime.node().display()
+                ),
+            );
+            return;
+        };
+        // 本体是常驻进程：必须边跑边转发它的输出，等它退出才读等于什么都看不到。
+        if let Some(stderr) = child.stderr.take() {
+            thread::spawn(move || {
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    if !line.trim().is_empty() {
+                        eprintln!("one: 本体：{line}");
+                    }
+                }
+            });
+        }
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+impl CoreRuntime {
+    pub fn node(&self) -> PathBuf {
+        match self {
+            CoreRuntime::Bundled { node, .. } => node.clone(),
+            CoreRuntime::Source { node, .. } => PathBuf::from(node),
+        }
+    }
+
+    pub fn entry(&self) -> PathBuf {
+        match self {
+            CoreRuntime::Bundled { entry, .. } | CoreRuntime::Source { entry, .. } => {
+                entry.clone()
+            }
+        }
+    }
+
+    /// 本体进程的工作目录。产物里是产物根（相对路径才指得对），开发时是仓库根。
+    pub fn root(&self) -> PathBuf {
+        match self {
+            CoreRuntime::Bundled { root, .. } | CoreRuntime::Source { root, .. } => {
+                root.clone()
+            }
+        }
+    }
+}
 
 /// What this process is, and whether ONE 本体 answered. The renderer asks for
 /// this instead of guessing from the URL: both clients load the same page.
@@ -47,6 +307,8 @@ pub struct CoreStatus {
     pub capabilities: Vec<String>,
     pub wire_version: u32,
     pub core_version: Option<String>,
+    /// 本体起不来时的原因，直接显示给用户；起得来就是 None。
+    pub core_problem: Option<String>,
 }
 
 /// 本体拒绝了一个请求时给出的失败。code 保留下来是为了让调用方把「没运行」「没这个
@@ -65,6 +327,11 @@ pub struct CoreLink {
     wire_version: u32,
     /// 本体接受握手后回报的版本；未连接时为 None，不猜。
     core_version: Mutex<Option<String>>,
+    /// **本体起不来的原因**，原样透给界面。`None` 表示没出过错。
+    ///
+    /// 存起来而不是只打日志，是因为「本体没接上」这句话对用户毫无用处 ——
+    /// 他需要知道是「漏打包」还是「node 没装」还是「产物坏在哪儿」（ADR-021）。
+    core_problem: Mutex<Option<String>>,
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     connected: Mutex<bool>,
     /// 菜单动作由壳发起，界面上没有回执框，因此壳自己认领这些 id。
@@ -88,7 +355,15 @@ impl CoreLink {
             capabilities: self.capabilities.clone(),
             wire_version: self.wire_version,
             core_version: self.core_version.lock().unwrap().clone(),
+            core_problem: self.core_problem.lock().unwrap().clone(),
         }
+    }
+
+    /// 记下本体起不来的原因。它会**一直留着**直到本体真的连上一次 ——
+    /// 静默清掉的话，用户盯着「没接上」两个字永远不知道自己该去做什么。
+    pub fn note_core_problem(&self, problem: String) {
+        eprintln!("one: 本体不可用：{problem}");
+        *self.core_problem.lock().unwrap() = Some(problem);
     }
 
     /// A request id the shell owns, so its outcome is not silently dropped.
@@ -276,6 +551,9 @@ fn note_core_version(link: &CoreLink, line: &str) {
     if let Some(version) = value.get("coreVersion").and_then(Value::as_str) {
         *link.core_version.lock().unwrap() = Some(version.to_string());
     }
+    // 本体真的接上了，之前记下的「起不来」到此作废。留着的话，界面上会一边
+    // 显示「已连接」一边显示「漏打包」，两句话互相打架。
+    *link.core_problem.lock().unwrap() = None;
 }
 
 /// 本体来的每一行都原样转给 webview，由它自己解释；壳只顺手认领自己发起的请求。
@@ -372,43 +650,6 @@ fn repo_root() -> Result<PathBuf, String> {
     ))
 }
 
-/// 启动本体。宠物是默认安装的那个客户端，但两端都需要它活着。
-pub fn start_core() -> Result<(), String> {
-    // 打包后的 exe 可能在任意目录启动，因此不依赖当前工作目录。
-    let root = repo_root()?;
-    let script = root.join(CORE_ENTRY);
-    if !script.exists() {
-        return Err(format!("找不到本体入口：{}", script.display()));
-    }
-    thread::spawn(move || {
-        let mut command = std::process::Command::new("node");
-        command
-            .arg(&script)
-            .current_dir(&root)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped());
-        // 客户端本身是 GUI 子系统（不弹控制台），而 node 是控制台程序：父进程
-        // 没有控制台时，Windows 会给它新分配一个，于是每开一次宠物就闪一个黑框。
-        // CREATE_NO_WINDOW 让本体在后台安静地跑，日志仍然走 stderr 转发。
-        command.creation_flags(CREATE_NO_WINDOW);
-        let Ok(mut child) = command.spawn() else {
-            eprintln!("one: 启动本体失败：node 不可用");
-            return;
-        };
-        // 本体是常驻进程：必须边跑边转发它的输出，等它退出才读等于什么都看不到。
-        if let Some(stderr) = child.stderr.take() {
-            thread::spawn(move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    if !line.trim().is_empty() {
-                        eprintln!("one: 本体：{line}");
-                    }
-                }
-            });
-        }
-        let _ = child.wait();
-    });
-    Ok(())
-}
 
 fn spawn_pipe_reader(app: AppHandle) {
     thread::spawn(move || loop {
@@ -514,6 +755,7 @@ pub fn start_bridge(
         capabilities: capabilities.iter().map(|item| item.to_string()).collect(),
         wire_version,
         core_version: Mutex::new(None),
+        core_problem: Mutex::new(None),
         writer: Mutex::new(None),
         connected: Mutex::new(false),
         shell_pending: Mutex::new(HashSet::new()),
@@ -528,6 +770,28 @@ pub fn start_bridge(
 mod tests {
     use super::*;
 
+    /// 临时目录建在目标目录旁边（Windows 允许跨卷创建，这里同卷最省事）。
+    /// 名字带测试用途与随机尾巴，并发跑时不互相踩。
+    fn temp_dir(name: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "one-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&base).expect("建临时目录");
+        base
+    }
+
+    fn write_file(path: &std::path::Path, bytes: &[u8]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("建上级目录");
+        }
+        std::fs::write(path, bytes).expect("写临时文件");
+    }
+
     fn link() -> std::sync::Arc<CoreLink> {
         std::sync::Arc::new(CoreLink {
             role: "pet".into(),
@@ -536,6 +800,7 @@ mod tests {
             capabilities: Vec::new(),
             wire_version: 3,
             core_version: Mutex::new(None),
+        core_problem: Mutex::new(None),
             writer: Mutex::new(None),
             connected: Mutex::new(false),
             shell_pending: Mutex::new(HashSet::new()),
@@ -543,6 +808,127 @@ mod tests {
             waiting: Mutex::new(HashMap::new()),
             last_frames: Mutex::new(Vec::new()),
         })
+    }
+
+    #[test]
+    fn a_bundled_manifest_names_the_node_and_the_entry() {
+        // 产物目录里放一个能过的清单：壳据此启动，全程不猜。
+        let root = temp_dir("r02-ok");
+        write_file(&root.join("node.exe"), b"MZ");
+        write_file(&root.join("core/src/index.ts"), b"// core");
+        write_file(
+            &root.join(RUNTIME_MANIFEST),
+            br#"{"nodeExe":"node.exe","entry":"core/src/index.ts","node":"v22.0.0"}"#,
+        );
+        let CoreRuntime::Bundled { node, entry, root: found } = read_manifest(&root).unwrap()
+        else {
+            panic!("清单完整时应当认成产物");
+        };
+        assert!(node.ends_with("node.exe"), "启动的是产物自带的 node，不是系统 node");
+        assert!(entry.ends_with(r"core\src\index.ts"));
+        assert_eq!(found, root);
+    }
+
+    #[test]
+    fn a_manifest_cannot_point_the_shell_outside_its_own_directory() {
+        // 清单来自磁盘，磁盘上的东西不可信：路径跑出产物目录一律拒绝。
+        let root = temp_dir("r02-escape");
+        write_file(&root.join("node.exe"), b"MZ");
+        write_file(&root.join(RUNTIME_MANIFEST), br#"{"nodeExe":"..\\..\\evil.exe","entry":"core/src/index.ts"}"#);
+        let reason = read_manifest(&root).expect_err("跑出产物目录的路径必须被拒");
+        assert!(matches!(reason, CoreUnavailable::BrokenManifest { .. }));
+    }
+
+    #[test]
+    fn an_incomplete_manifest_says_which_part_is_missing() {
+        // 构建没跑完、或产物被人动过 —— 说清缺什么，别压成一句「没接上」。
+        let cases: [(&str, &[u8]); 3] = [
+            ("r02-no-node", br#"{"entry":"core/src/index.ts"}"#),
+            ("r02-no-entry", br#"{"nodeExe":"node.exe"}"#),
+            ("r02-bad-json", b"not json at all"),
+        ];
+        for (name, body) in cases {
+            let root = temp_dir(name);
+            write_file(&root.join("node.exe"), b"MZ");
+            write_file(&root.join("core/src/index.ts"), b"// core");
+            write_file(&root.join(RUNTIME_MANIFEST), body);
+            let reason = read_manifest(&root).expect_err("残缺的清单必须被拒");
+            assert!(matches!(reason, CoreUnavailable::BrokenManifest { .. }), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_manifest_pointing_at_a_missing_node_is_refused() {
+        // 清单说 node 在，可文件没了：这时启动会失败，而失败会表现成「本体没接上」，
+        // 跟「漏打包」混成一句话。构建期就拒掉。
+        let root = temp_dir("r02-gone");
+        write_file(&root.join("core/src/index.ts"), b"// core");
+        write_file(&root.join(RUNTIME_MANIFEST), br#"{"nodeExe":"node.exe","entry":"core/src/index.ts"}"#);
+        assert!(matches!(
+            read_manifest(&root),
+            Err(CoreUnavailable::BrokenManifest { .. })
+        ));
+    }
+
+    #[test]
+    fn no_runtime_anywhere_reports_where_it_looked() {
+        // 一台没跑过 core:package、又不在仓库里的机器：用户要知道去找过哪儿、
+        // 该做什么，而不是只看见「本体没接上」。
+        // 搜索根显式给空、仓库查找显式给 None，因此不依赖测试机自己所在的位置。
+        let reason = find_core_in_with(&[], || Err("测试：这台机器不在仓库里".into()))
+            .expect_err("哪儿都没有就是没有");
+        let text = reason.describe();
+        assert!(text.contains("pnpm core:package"), "得告诉用户怎么办：{text}");
+        assert!(text.contains(RUNTIME_DIR), "得说清找过哪儿：{text}");
+    }
+
+    #[test]
+    fn a_bundled_runtime_wins_over_the_development_sources() {
+        // 产物优先：真到用户机器上时根本没有仓库可回退，这条路必须是常态而不是
+        // 兜底。开发机上也可能编过一份，用它才不会让本地行为与发布版分叉。
+        let root = temp_dir("r02-priority");
+        write_file(&root.join(RUNTIME_DIR).join("node.exe"), b"MZ");
+        write_file(
+            &root.join(RUNTIME_DIR).join("core/src/index.ts"),
+            b"// bundled",
+        );
+        write_file(
+            &root.join(RUNTIME_DIR).join(RUNTIME_MANIFEST),
+            br#"{"nodeExe":"node.exe","entry":"core/src/index.ts"}"#,
+        );
+        let found = find_core_in_with(&[root], || Err("测试：不该走到回退".into()))
+            .expect("产物应当被认出来");
+        assert!(
+            matches!(found, CoreRuntime::Bundled { .. }),
+            "有产物就不该回退到源码"
+        );
+    }
+
+    #[test]
+    fn a_missing_manifest_falls_through_to_the_development_sources() {
+        // 目录在、清单不在 = 构建没跑完。这时开发机该继续用源码而不是报错 ——
+        // 开发时反复跑 core:package 是常事，报错只会让人烦。
+        let root = temp_dir("r02-fallthrough");
+        std::fs::create_dir_all(root.join(RUNTIME_DIR)).unwrap();
+        write_file(&root.join(CORE_ENTRY), b"// core");
+        let found = find_core_in_with(&[], || Ok(root.clone()))
+            .expect("应当回退到源码");
+        assert!(matches!(found, CoreRuntime::Source { .. }));
+        assert_eq!(found.node(), PathBuf::from("node"), "开发时用系统 node");
+    }
+
+    #[test]
+    fn the_runtime_points_at_its_own_directory_so_relative_imports_resolve() {
+        // 本体的 import 全是相对的（`../../packages/...`），工作目录与入口的相对位置
+        // 错了就找不到 contracts —— 而那个错会表现成「本体崩了」。
+        let root = temp_dir("r02-relative");
+        write_file(&root.join("node.exe"), b"MZ");
+        write_file(&root.join("core/src/index.ts"), b"// core");
+        write_file(&root.join(RUNTIME_MANIFEST), br#"{"nodeExe":"node.exe","entry":"core/src/index.ts"}"#);
+        let CoreRuntime::Bundled { entry, root: found, .. } = read_manifest(&root).unwrap() else {
+            panic!("应当认成产物");
+        };
+        assert!(entry.starts_with(&found), "入口必须相对产物根");
     }
 
     #[test]

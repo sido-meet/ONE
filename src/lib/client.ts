@@ -158,6 +158,8 @@ function channelFor(self: ClientIdentity): CoreChannel {
       capabilities: self.capabilities,
       wireVersion: WIRE_VERSION,
       coreVersion: '浏览器预览',
+      // 预览里的本体是同进程里现造的一个，它当然起得来。
+      coreProblem: null,
     },
   });
 }

@@ -36,6 +36,14 @@ export interface CoreConnection {
   capabilities: string[];
   wireVersion: number;
   coreVersion: string | null;
+  /**
+   * 本体**起不来**的原因，壳的原话（ADR-021）。
+   *
+   * 它存在的理由很直接：「本体没接上」这句话对用户毫无用处 —— 他需要知道是
+   * 漏打包、node 没装、还是产物坏在哪儿。这三件事该做的完全不同。
+   * 本体接上之后是 null。
+   */
+  coreProblem: string | null;
 }
 
 export interface Roster {
@@ -103,7 +111,10 @@ export interface CoreClient {
   revision(): number;
   /** 本体拒绝了这个客户端时给出的原因，例如协议版本不兼容。 */
   refusal(): string;
-  /** 现在拿不到状态的原因：被拒绝，或者帧送不出去。界面要把它说出来。 */
+  /**
+   * 现在拿不到状态的原因：被拒绝、帧送不出去、或者**本体压根没起来**。
+   * 界面要把它说出来 —— 一句「没接上」对用户毫无用处（ADR-021）。
+   */
   problem(): string;
   listClients(): Promise<Roster>;
   launch(provider: ProviderId): Promise<unknown>;
@@ -436,7 +447,9 @@ export function createCoreClient(
     snapshot: () => snapshot,
     revision: () => revision,
     refusal: () => refusal,
-    problem: () => refusal || failure,
+    // 顺序有讲究：本体**起不来**比「被拒绝」更根本 —— 被拒绝是本体在说话，
+    // 起不来是压根没有本体。两者都发生时，起不来那条才是用户该动手解决的。
+    problem: () => connection?.coreProblem || refusal || failure,
     listClients: () =>
       request<Roster>({ t: 'clients.list', id: crypto.randomUUID() }),
     launch: (provider: ProviderId) =>

@@ -51,6 +51,7 @@ function peer(
         capabilities,
         wireVersion: WIRE_VERSION,
         coreVersion: 'test',
+        coreProblem: null,
       },
     }),
     hello,
@@ -79,6 +80,7 @@ function offlineClient(): { link: CoreClient; hello: ClientMessage } {
       capabilities: [],
       wireVersion: WIRE_VERSION,
       coreVersion: null,
+      coreProblem: null,
     }),
     send: async () => {
       throw new Error('ONE 本体没有连接');
@@ -93,6 +95,7 @@ function offlineClient(): { link: CoreClient; hello: ClientMessage } {
         capabilities: [],
         wireVersion: WIRE_VERSION,
         coreVersion: null,
+        coreProblem: null,
       });
       return () => undefined;
     },
@@ -159,6 +162,7 @@ describe('core 客户端', () => {
           capabilities: [],
           wireVersion: WIRE_VERSION + 99,
           coreVersion: 'test',
+          coreProblem: null,
         },
       }),
       hello,
@@ -168,6 +172,110 @@ describe('core 客户端', () => {
     await expect(link.client.sendMessage('welcome', 'hi')).rejects.toThrow(
       /协议版本不兼容/,
     );
+  });
+
+  /**
+   * 本体起不来的原因必须**盖过**「本体没有连接」（ADR-021）。
+   *
+   * 这不是偏好问题而是结构问题：壳报 `connected: false` 时 `markUnavailable`
+   * 一定会把 `failure` 设成那句笼统的话，所以只要 coreProblem 不排在前面，
+   * 壳费劲查出来的原因（漏打包 / node 没装 / 清单坏了）每次都会被吃掉，
+   * 用户永远只看到「没接上」。
+   */
+  it('本体起不来的原因盖过笼统的「本体没有连接」', () => {
+    const reason =
+      '找不到 ONE 本体可执行运行时。找过：D:\\one\\dist-runtime（pnpm core:package）';
+    const hello: ClientMessage = {
+      t: 'hello',
+      v: WIRE_VERSION,
+      client: {
+        role: 'pet',
+        provider: 'pet',
+        label: 'test pet',
+        capabilities: [],
+      },
+    };
+    const status = {
+      connected: false,
+      role: 'pet',
+      provider: 'pet',
+      label: 'test pet',
+      capabilities: [],
+      wireVersion: WIRE_VERSION,
+      coreVersion: null,
+      coreProblem: reason,
+    };
+    const channel: CoreChannel = {
+      connection: async () => status,
+      send: async () => {
+        throw new Error('ONE 本体没有连接');
+      },
+      onFrame: () => () => undefined,
+      onStatus: (handler) => {
+        handler(status);
+        return () => undefined;
+      },
+    };
+    const link = createCoreClient(channel, hello);
+    expect(link.state()).toBe('unavailable');
+    expect(link.problem()).toBe(reason);
+    expect(link.problem()).not.toContain('没有连接');
+  });
+
+  it('本体起不来盖过协议不兼容：起不来才是更根本的那条', async () => {
+    const core = createCore(createMockClient(), { version: 'test' });
+    const hello: ClientMessage = {
+      t: 'hello',
+      v: WIRE_VERSION + 99,
+      client: {
+        role: 'pet',
+        provider: 'pet',
+        label: 'test pet',
+        capabilities: [],
+      },
+    };
+    const status = {
+      connected: true,
+      role: 'pet',
+      provider: 'pet',
+      label: 'test pet',
+      capabilities: [],
+      wireVersion: WIRE_VERSION,
+      coreVersion: 'test',
+      coreProblem: '壳自己那份本体没起来，可能是 dist-runtime 漏打包',
+    };
+    const lines: string[] = [];
+    const link = createCoreClient(
+      {
+        connection: async () => status,
+        send: async (frame: ClientMessage) => {
+          lines.push(JSON.stringify(frame));
+        },
+        onFrame: (handler) => {
+          // 壳那边的管道上挂着另一个本体，它按自己的版本表拒绝了我们。
+          handler(
+            JSON.stringify({
+              t: 'rejected',
+              message: '协议版本不兼容：壳报 3，本体要 102',
+            }),
+          );
+          return () => undefined;
+        },
+        onStatus: () => () => undefined,
+      },
+      hello,
+    );
+    await vi.waitFor(() => expect(link.state()).toBe('rejected'));
+    expect(link.refusal()).toContain('协议版本不兼容');
+    expect(link.problem()).toContain('漏打包');
+  });
+
+  it('本体接上之后就不再拿「起不来」说事', async () => {
+    const core = createCore(createMockClient(), { version: 'test' });
+    const { link } = peer('pet', [], core);
+    await vi.waitFor(() => expect(link.state()).toBe('ready'));
+    expect(link.problem()).toBe('');
+    expect(link.connection()?.coreProblem).toBeNull();
   });
 
   it('同一个对话同时只允许一个写入 Run，第二个必须被本体拒绝', async () => {
@@ -222,6 +330,7 @@ describe('core 客户端', () => {
         capabilities: [CAPABILITY.bubbleOpen],
         wireVersion: WIRE_VERSION,
         coreVersion: 'test',
+        coreProblem: null,
       },
     });
     // 对话条窗口**先**挂载。注册顺序写死在这里，断言的是「本体最终收到什么」，

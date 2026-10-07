@@ -49,11 +49,14 @@ desktop:build 当前只构建可执行程序，不生成安装包。Tauri 标识
 
 壳按客户端种类动态建窗：`pet`（128×128 透明置顶）、`bubble`（380×168 无边框透明置顶，初始隐藏）、`main`（1200×820，仅桌面端客户端）。`tauri.conf.json` 的 `app.windows` 为空数组，窗口在 `setup` 里按客户端种类创建，两种客户端加载同一份前端。窗口动作只能通过 `invoke` 调用壳命令，能力文件只开放事件收发。
 
-启动本体需要 `ONE_REPO_ROOT`（或从编译期的 `CARGO_MANIFEST_DIR` 向上找到 `core/src/index.ts`），本体用系统里的 `node` 跑源码。0.1 用 `ONE_INSTALLED` 环境变量代替安装器，默认 `pet`。客户端种类有两种传法：已构建的 exe 用 `--client=pet`，`tauri dev` 用 `ONE_CLIENT=pet`（Tauri CLI 会把 `--client=` 错位传给 cargo）。
+启动本体有两种方式（ADR-021）：仓库里跑源码（开发用，系统 `node`），或用 `pnpm core:package` 产出的随包运行时（发布用，自带 `node.exe`，机器上没装 node 也能跑）。壳**优先找产物**，找不到才回退源码；两处都没有时它会停下来说清找过哪儿，而不是表现成「本体没接上」。
+
+源码路径靠 `ONE_REPO_ROOT`（或从编译期的 `CARGO_MANIFEST_DIR` 向上找到 `core/src/index.ts`）定位。0.1 用 `ONE_INSTALLED` 环境变量代替安装器，默认 `pet`。客户端种类有两种传法：已构建的 exe 用 `--client=pet`，`tauri dev` 用 `ONE_CLIENT=pet`（Tauri CLI 会把 `--client=` 错位传给 cargo）。`ONE_CORE_RUNTIME` 可以显式指定产物目录，联调时用得上。
 
 ```powershell
 pnpm core            # 只启动 ONE 本体
 pnpm core:cli list   # 用命令行客户端看本体持有的状态与名册
+pnpm core:package    # 打出本体的可分发产物到 dist-runtime/（node.exe + core + 清单）
 pnpm pet:dev         # 宠物客户端（tauri dev）
 pnpm desktop:dev     # 桌面端客户端（tauri dev）
 pnpm desktop:build   # 原生可执行程序（release），会重新嵌入前端资源
@@ -62,6 +65,12 @@ Set-Location src-tauri; cargo test   # 窗口定位、菜单接线、帧边界�
 ```
 
 **发布版必须用 `pnpm desktop:build`。** `cargo build --release` 不会重新嵌入前端资源，会得到一个打开就是"无法访问此页面"的程序。`scripts/client.mjs` 会先确保本体在运行、再拉起客户端。
+
+**`dist-runtime/` 里有 80MB 以上的 `node.exe`，已 gitignore，不要提交。** 重新打包前先关掉上一轮起着的宠物与本体：那份 `node.exe` 正被进程锁着，否则打包会失败（脚本会直接告诉你原因，不会甩一坨 EIO 栈）。要验证产物路径，把 `dist-runtime` 放到 exe 旁边即可 —— 壳启动时第一件事就是打一行日志，说明本体实际用的是哪份 node：
+
+```
+one: 本体运行时：…\dist-runtime\core/src/index.ts（…\dist-runtime\node.exe），工作目录 …\dist-runtime
+```
 
 ## 调试插件页面
 

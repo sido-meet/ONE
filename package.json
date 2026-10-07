@@ -19,6 +19,7 @@
     "verify": "pnpm check && pnpm test && pnpm build && pnpm format:check",
     "core": "node core/src/index.ts",
     "core:cli": "node core/src/cli-main.ts",
+    "core:package": "node scripts/package-core.mjs",
     "provider:local": "node packages/provider-local/src/main.ts",
     "client": "node scripts/client.mjs",
     "client:pet": "node scripts/client.mjs pet",

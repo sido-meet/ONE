@@ -130,6 +130,10 @@ function toConnection(value: unknown): CoreConnection {
       typeof record.wireVersion === 'number' ? record.wireVersion : 0,
     coreVersion:
       typeof record.coreVersion === 'string' ? record.coreVersion : null,
+    // 壳说本体起不来的原因。原样带过来，界面才说得出「漏打包」而不是
+    // 「没接上」（ADR-021）。老壳没这个字段时当成没有，别自己编一个。
+    coreProblem:
+      typeof record.coreProblem === 'string' ? record.coreProblem : null,
   };
 }
 

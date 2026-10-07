@@ -671,8 +671,8 @@ fn core_hello(link: State<'_, core_link::CoreLink>) -> Value {
 
 /// 启动本体。宠物是默认安装的那个客户端，但两端都需要它活着。
 #[tauri::command]
-fn core_start() -> Result<(), String> {
-    core_link::start_core()
+fn core_start(app: AppHandle) -> Result<(), String> {
+    core_link::start_core(&app)
 }
 
 /// 插件页面在 iframe 里要写的地址前缀（ADR-018）。
@@ -873,7 +873,7 @@ fn shell_request_id(app: &AppHandle) -> String {
 }
 
 fn launch_through_core(app: &AppHandle, kind: &str) {
-    if let Err(error) = core_link::start_core() {
+    if let Err(error) = core_link::start_core(app) {
         eprintln!("one: 无法启动本体：{error}");
     }
     let frame = json!({ "t": "clients.launch", "id": shell_request_id(app), "kind": kind });
@@ -946,8 +946,8 @@ fn main() {
             // 本体是默认安装的那一半，客户端保证它活着。再往前挪是为了让"先起
             // 后端、再连接、最后才是界面"成立：本体没起来之前就把窗口摆出来，
             // 用户会先看到一个写着"本体未连接"的宠物。
-            if let Err(error) = core_link::start_core() {
-                eprintln!("one: 本体没有启动，界面会显示未连接：{error}");
+            if let Err(error) = core_link::start_core(&handle) {
+                eprintln!("one: 本体没有启动，界面会显示原因：{error}");
             }
             if let Err(error) = build_windows(&handle, client) {
                 eprintln!("one: 创建客户端窗口失败：{error}");
@@ -996,7 +996,7 @@ fn main() {
             app.on_menu_event(|app, event| match menu_action(event.id().as_ref()) {
                 Some(MenuAction::Launch(kind)) => launch_through_core(app, kind),
                 Some(MenuAction::RestartCore) => {
-                    if let Err(error) = core_link::start_core() {
+                    if let Err(error) = core_link::start_core(app) {
                         eprintln!("one: 本体没有启动：{error}");
                     }
                 }

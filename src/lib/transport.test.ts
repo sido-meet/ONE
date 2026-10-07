@@ -38,6 +38,7 @@ describe('一根管道只有一次握手', () => {
       capabilities: [CAPABILITY.bubbleOpen],
       wireVersion: WIRE_VERSION,
       coreVersion: 'test',
+      coreProblem: null,
     };
     const listeners: ((line: string) => void)[] = [];
     const channel = {
@@ -93,6 +94,7 @@ describe('一根管道只有一次握手', () => {
         capabilities: [],
         wireVersion: WIRE_VERSION,
         coreVersion: 'test',
+        coreProblem: null,
       }),
       send: async (frame: ClientMessage) => {
         sent.push(frame.t);
@@ -131,6 +133,7 @@ function setup() {
       capabilities: [CAPABILITY.bubbleOpen],
       wireVersion: WIRE_VERSION,
       coreVersion: 'test',
+      coreProblem: null,
     },
   });
   channel.onFrame((line) => lines.push(line));
