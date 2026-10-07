@@ -2,11 +2,19 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type net from 'node:net';
 import path from 'node:path';
-import { createMockClient } from '../../packages/mock-runtime/src/index.ts';
+import {
+  createMemoryRuntime,
+  createMockAgents,
+} from '../../packages/mock-runtime/src/index.ts';
 import { isProviderId } from '../../packages/contracts/src/wire.ts';
 import type { ProviderId } from '../../packages/contracts/src/index.ts';
 import { createCore } from './core.ts';
 import type { DomainPorts } from './core.ts';
+import { createConversationRuntime } from '../../packages/conversation/src/runtime.ts';
+import {
+  createSqliteConversationStore,
+  openConversationDatabase,
+} from '../../packages/conversation/src/store-sqlite.ts';
 import { PIPE_PATH, serveOnPipe } from './pipe.ts';
 import { createProviderRegistry } from './providers/registry.ts';
 import type { ProviderDeclaration } from './providers/registry.ts';
@@ -81,7 +89,25 @@ const launchClient = (provider: ProviderId) =>
   launchScript(LAUNCH_SCRIPTS[provider] ?? `client:${provider}`);
 
 const installed = readInstalled(dataDir());
-const runtime = createMockClient();
+
+/**
+ * 会话运行时：**对话归本体**（ADR-028）。
+ *
+ * Store 是 SQLite（`core.db`），Agent 是模拟的（`packages/mock-runtime`）。状态机只有
+ * 一份 —— 换成真模型时换的是 Agent 那一行，不是这里。`core.db` 与提供方的 `local.db`
+ * 是两个文件：所有者不同，合成一个就意味着本体要写提供方的 schema。
+ *
+ * 库开在**本体这一侧**，所以本体崩了重启回来，对话还在；而上次崩在半路的 Run 会
+ * 落成 `interrupted`，不会永远转圈。
+ */
+const conversationDatabase = openConversationDatabase(
+  path.join(dataDir(), 'core.db'),
+);
+const runtime = createConversationRuntime(
+  createSqliteConversationStore(conversationDatabase),
+  createMockAgents(),
+);
+process.stderr.write(`ONE 本体：会话库 ${conversationDatabase.file}\n`);
 
 /**
  * 装了什么、准备拉起什么，写一行日志。

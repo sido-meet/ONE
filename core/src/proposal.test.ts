@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createMemoryProviders,
-  createMockClient,
+  createMemoryRuntime,
 } from '../../packages/mock-runtime/src/index.ts';
 import type { MemoryProviders } from '../../packages/mock-runtime/src/index.ts';
 import { createCore } from './core.ts';
@@ -27,7 +27,7 @@ const hello = (provider: string): ClientMessage => ({
   client: { role: provider, provider, label: provider, capabilities: [] },
 });
 
-let runtime: ReturnType<typeof createMockClient>;
+let runtime: ReturnType<typeof createMemoryRuntime>;
 let providers: MemoryProviders;
 let core: Core;
 let session: ReturnType<Core['connect']>;
@@ -54,7 +54,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   seq = 0;
   sent = [];
-  runtime = createMockClient({ tickMs: 1 });
+  runtime = createMemoryRuntime({ tickMs: 1 });
   providers = createMemoryProviders();
   core = createCore(runtime, {
     version: 'test',

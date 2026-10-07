@@ -306,6 +306,10 @@
             </p>
           {:else if event.type === 'run.finished' && event.run.status === 'cancelled'}
             <p class="event-divider">回复已停止</p>
+          {:else if event.type === 'run.finished' && event.run.status === 'interrupted'}
+            <!-- 中断要**说出来**（ADR-028）。不渲染任何东西的话，用户会以为回复就
+                 这么停了 —— 那样「它到底有没有说完」这件事只有他知道，而他无从判断。 -->
+            <p class="event-divider">回复中断 · ONE 本体在那之前重启了</p>
           {/if}
         {/each}
         {#if activeRun}

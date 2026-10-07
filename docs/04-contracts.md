@@ -182,7 +182,7 @@ P03 把此草案写成 TypeScript 类型和运行时校验 schema。TypeScript �
 
 ## 事件与 Run 状态
 
-当前 durable：message.created、agent.changed、run.started、run.finished。当前 token 增量体现在 Snapshot.drafts；EphemeralEvent 类型预留，尚未提供独立事件订阅接口。
+当前 durable：message.created、agent.changed、run.started、run.finished（终态含 `interrupted`）、proposal.created、proposal.settled。当前 token 增量体现在 Snapshot.drafts；EphemeralEvent 类型预留，尚未提供独立事件订阅接口。
 
 后续 durable：tool.requested、permission.resolved、tool.completed/failed、artifact.created、conversation.summarized。后续 ephemeral：message.delta、progress、typing、stdout.delta（有缓冲上限）。不收集隐藏 chain-of-thought。
 
@@ -200,6 +200,14 @@ SQLite 表：workspaces、conversations、runs、agent_bindings、conversation_e
 - v1 导出 JSON 带 schemaVersion 和相对附件路径；导入校验大小、路径穿越和未知字段。
 - 自动摘要不覆盖原消息；记录生成范围与来源 seq。用户可纠正摘要。
 
-**已实现（R01，ADR-027）**：上面十张表里的五张已经在 `<数据目录>/local.db` 里 —— `notes`、`calendar_events`、`audit_entries`、`command_receipts`、`schema_migrations`。库用 `node:sqlite` 开，**不加任何依赖**；`journal_mode=WAL` + `synchronous=FULL` + `foreign_keys=ON` + `busy_timeout=5000`。两条约束已经落成声明式的：版本守卫写进 `UPDATE … WHERE version = ?`，幂等回执的**唯一约束在主键上** `(workspace_id, idempotency_key)`。0.1 的两个 JSON 文件由迁移 v2 导入，**原文件一个字节都不动**，成功后改名成 `.migrated`；坏文件让整次迁移失败而不是静默导空。
+**已实现（R01，ADR-027）**：`notes`、`calendar_events`、`audit_entries`、`command_receipts`、`schema_migrations` 五张表在 `<数据目录>/local.db` 里，归本地提供方。库用 `node:sqlite` 开，**不加任何依赖**；`journal_mode=WAL` + `synchronous=FULL` + `foreign_keys=ON` + `busy_timeout=5000`。两条约束已经落成声明式的：版本守卫写进 `UPDATE … WHERE version = ?`，幂等回执的**唯一约束在主键上** `(workspace_id, idempotency_key)`。0.1 的两个 JSON 文件由迁移 v2 导入，**原文件一个字节都不动**，成功后改名成 `.migrated`；坏文件让整次迁移失败而不是静默导空。
 
-**没实现的**：`workspaces`、`conversations`、`runs`、`agent_bindings`、`conversation_events`、`artifacts` 六张表**还没建**，它们归 R03（会话运行时持久化）。所以「同事务写投影与事件」这条目前只有日历与笔记这一半，事件侧要等 R03。`dataDir()` 的优先级是 `ONE_DATA_DIR` > `%APPDATA%\ONE\data`。
+**已实现（R03，ADR-028）**：`workspaces`、`conversations`、`runs`、`agent_bindings`、`conversation_events` 五张表在 `<数据目录>/core.db` 里，归**本体**。两个库文件、两个主人 —— 领域数据归提供方，对话归本体。
+
+- **`conversation_events` 是唯一真相**，`PRIMARY KEY (conversation_id, seq)`：seq 不重复也不跳号，跳号会直接撞主键。`runs` 与 `proposals` 是从事件**投影**出来的，不另存一份权威状态。
+- `appendBatch` 整批**同事务**写入：一次 Run 的「开始」与「结束」要么都在，要么都不在。
+- **`RunStatus` 新增 `interrupted`**：本体崩在回复生成到一半时，重启后这次 Run 落成 `interrupted`，界面渲染「回复中断 · ONE 本体在那之前重启了」。不说 `running`（界面永远转圈），不说 `completed`（谎称生成成功），也不悄悄重跑。
+- **流式半截不落库**。`drafts` 不是持久历史，跑完才整条落 `message.created`；被取消的回复不落，因为它是用户没看完的东西。
+- **Agent 只回答「说什么」**（`ReplyAgent`）：给「这句话 + 上一条回复」，回「这段话 + 可选草稿」。它不持有对话、不决定 seq。切 Agent 换的是「谁回答」，不是「谁记着说过什么」。
+
+**没实现的**：`artifacts` 表还没建（附件放数据目录、用摘要关联，归 R04）。数据目录由 `dataDir()` 解析，优先级 `ONE_DATA_DIR` > `%APPDATA%\ONE\data`。

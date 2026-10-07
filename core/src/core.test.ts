@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createMockClient } from '../../packages/mock-runtime/src/index.ts';
+import { createMemoryRuntime } from '../../packages/mock-runtime/src/index.ts';
 import type { ConversationRuntime } from '../../packages/contracts/src/index.ts';
 import type {
   ClientMessage,
@@ -56,7 +56,7 @@ let core: Core;
 
 beforeEach(() => {
   vi.useFakeTimers();
-  client = createMockClient({ tickMs: 5 });
+  client = createMemoryRuntime({ tickMs: 5 });
   core = createCore(client, { version: 'test', installed: ['pet'] });
 });
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createMockClient } from '../../packages/mock-runtime/src/index.ts';
+import { createMemoryRuntime } from '../../packages/mock-runtime/src/index.ts';
 import {
   PAGE_READ_CAPABILITY,
   WIRE_VERSION,
@@ -21,7 +21,7 @@ import type { Connection, Core } from './core.ts';
 type Session = ReturnType<Core['connect']>;
 
 function core(options: { capabilityTimeoutMs?: number } = {}): Core {
-  return createCore(createMockClient(), {
+  return createCore(createMemoryRuntime(), {
     version: 'test',
     installed: ['pet'],
     ...options,

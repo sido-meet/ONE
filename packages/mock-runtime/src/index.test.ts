@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createMockClient } from './index.ts';
+import { createMemoryRuntime } from './index.ts';
 import type { ConversationRuntime } from '../../contracts/src/index.ts';
 
 let client: ConversationRuntime;
@@ -10,7 +10,7 @@ afterEach(() => {
 describe('ONE conversation boundary', () => {
   it('keeps history and ordered durable events when switching agents', async () => {
     vi.useFakeTimers();
-    client = createMockClient();
+    client = createMemoryRuntime();
     await client.sendMessage('welcome', '你好');
     vi.runAllTimers();
     await client.changeAgent('welcome', 'claude-code');
@@ -26,7 +26,7 @@ describe('ONE conversation boundary', () => {
   });
   it('rejects overlapping sends and switches; cancellation has exactly one terminal event', async () => {
     vi.useFakeTimers();
-    client = createMockClient();
+    client = createMemoryRuntime();
     const run = await client.sendMessage('welcome', '测试取消');
     await expect(client.sendMessage('welcome', '重复')).rejects.toMatchObject({
       code: 'BUSY',
@@ -48,7 +48,7 @@ describe('ONE conversation boundary', () => {
   });
   it('isolates conversations and protects state from callers', async () => {
     vi.useFakeTimers();
-    client = createMockClient();
+    client = createMemoryRuntime();
     const other = await client.createConversation('独立对话');
     await client.sendMessage(other.id, '第二个对话');
     vi.runAllTimers();
@@ -62,7 +62,7 @@ describe('ONE conversation boundary', () => {
     ).toBe(true);
   });
   it('validates input and notifies only active subscribers', async () => {
-    client = createMockClient();
+    client = createMemoryRuntime();
     const listener = vi.fn();
     const unsubscribe = client.subscribe(listener);
     await expect(client.sendMessage('welcome', '  ')).rejects.toMatchObject({
@@ -89,7 +89,7 @@ describe('ONE conversation boundary', () => {
 describe('一句话的三种结果', () => {
   const say = async (text: string) => {
     vi.useFakeTimers();
-    client = createMockClient();
+    client = createMemoryRuntime();
     await client.sendMessage('welcome', text);
     vi.runAllTimers();
     const snapshot = client.getSnapshot();
@@ -147,7 +147,7 @@ describe('一句话的三种结果', () => {
    */
   it('注入的故障只作用一次，之后恢复正常', async () => {
     vi.useFakeTimers();
-    client = createMockClient({ tickMs: 1 });
+    client = createMemoryRuntime({ tickMs: 1 });
     process.env['ONE_FAULT'] = 'timeout';
     await expect(
       client.sendMessage('welcome', '这句话会失败'),
@@ -168,7 +168,7 @@ describe('一句话的三种结果', () => {
 
   it('认不出的故障名当没写，不猜', async () => {
     vi.useFakeTimers();
-    client = createMockClient({ tickMs: 1 });
+    client = createMemoryRuntime({ tickMs: 1 });
     process.env['ONE_FAULT'] = '宇宙射线';
     await expect(
       client.sendMessage('welcome', '照常发送'),

@@ -1,5 +1,5 @@
 import type { ConversationRuntime } from '../../packages/contracts/src/index.ts';
-import { createMockClient } from '../../packages/mock-runtime/src/index';
+import { createMemoryRuntime } from '../../packages/mock-runtime/src/index';
 import { createCore } from '../../core/src/core';
 import { createCoreClient, EMPTY_SNAPSHOT } from './core-link';
 import type { CoreChannel, CoreClient } from './core-link';
@@ -149,7 +149,7 @@ function channelFor(self: ClientIdentity): CoreChannel {
   if (inTauri()) return tauriCoreChannel();
   // 浏览器预览：本体就在这个进程里，因此预览不会"看起来同步但其实各说各话"。
   return createMemoryCoreChannel({
-    core: createCore(createMockClient(), {
+    core: createCore(createMemoryRuntime(), {
       version: '浏览器预览',
       installed: ['pet', 'desktop'],
     }),

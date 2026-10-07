@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createMockClient } from '../../packages/mock-runtime/src/index.ts';
+import { createMemoryRuntime } from '../../packages/mock-runtime/src/index.ts';
 import {
   CAPABILITY,
   WIRE_VERSION,
@@ -20,7 +20,7 @@ import type { Core } from './core.ts';
  */
 
 function coreWith(installed: string[] = ['pet']): Core {
-  return createCore(createMockClient(), { version: 'test', installed });
+  return createCore(createMemoryRuntime(), { version: 'test', installed });
 }
 
 function pipe() {

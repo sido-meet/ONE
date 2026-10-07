@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createMockClient } from '../../packages/mock-runtime/src/index.ts';
+import { createMemoryRuntime } from '../../packages/mock-runtime/src/index.ts';
 import {
   CALENDAR_CAPABILITIES,
   ClientError,
@@ -66,7 +66,7 @@ function fakeLink(
 ): CoreClient {
   return {
     callCommand,
-    snapshot: () => createMockClient().getSnapshot(),
+    snapshot: () => createMemoryRuntime().getSnapshot(),
   } as unknown as CoreClient;
 }
 

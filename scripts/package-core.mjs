@@ -22,7 +22,7 @@ const outDir = path.join(repoRoot, 'dist-runtime');
 const coreDir = path.join(repoRoot, 'core');
 const packagesDir = path.join(repoRoot, 'packages');
 
-/** 本体运行时会读源码的四个目录。少一个就起不来，因此清单里逐个记下来。 */
+/** 本体运行时会读源码的目录。少一个就起不来，因此清单里逐个记下来。 */
 const NEEDED = [
   { from: coreDir, to: 'core' },
   // contracts 与 mock-runtime 是本体 import 的（相对路径），不带走就找不到类型与端口。
@@ -31,6 +31,12 @@ const NEEDED = [
   // hostpaths 是本体与本地提供方共用的路径解析。少了它本体连启动都做不到 ——
   // 它在 import 图上，离了这份清单就是一个第一次启动就报 ERR_MODULE_NOT_FOUND 的包。
   { from: path.join(packagesDir, 'hostpaths'), to: 'packages/hostpaths' },
+  // conversation 是**唯一**的会话状态机（ADR-028）。本体用它，测试与开发用它，
+  // 模拟运行时只是往里塞一个 Agent —— 少了它，本体第一次起对话就找不到模块。
+  { from: path.join(packagesDir, 'conversation'), to: 'packages/conversation' },
+  // sqlite 是本体与本地提供方共用的 pragma 与事务助手（ADR-028）。两个库的配置必须
+  // 一致，分开写迟早漂；它在 import 图上，少了它本体第一次开库就找不到模块。
+  { from: path.join(packagesDir, 'sqlite'), to: 'packages/sqlite' },
 ];
 
 /** 测试文件不带：发布产物里不需要 vitest，也省得让人以为本体依赖它。 */

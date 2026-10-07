@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createMockClient } from '../../packages/mock-runtime/src/index';
+import { createMemoryRuntime } from '../../packages/mock-runtime/src/index';
 import { createCore } from '../../core/src/core';
 import { CAPABILITY, WIRE_VERSION } from '../../packages/contracts/src/wire';
 import type {
@@ -24,7 +24,7 @@ interface Peer {
 function peer(
   provider: string,
   capabilities: string[],
-  core = createCore(createMockClient(), {
+  core = createCore(createMemoryRuntime(), {
     version: 'test',
     installed: ['pet', 'desktop'],
   }),
@@ -105,7 +105,7 @@ function offlineClient(): { link: CoreClient; hello: ClientMessage } {
 
 describe('core 客户端', () => {
   it('接上本体之后拿到的状态来自本体，而不是自己造的一份', async () => {
-    const core = createCore(createMockClient(), { version: 'test' });
+    const core = createCore(createMemoryRuntime(), { version: 'test' });
     const { link } = peer('pet', [], core);
     await vi.waitFor(() => expect(link.state()).toBe('ready'));
     expect(link.snapshot()).not.toBe(EMPTY_SNAPSHOT);
@@ -124,7 +124,7 @@ describe('core 客户端', () => {
   });
 
   it('只把状态和回执当状态，不把旧的一帧当成新的', async () => {
-    const core = createCore(createMockClient(), { version: 'test' });
+    const core = createCore(createMemoryRuntime(), { version: 'test' });
     const { link } = peer('pet', [], core);
     await vi.waitFor(() => expect(link.state()).toBe('ready'));
     const first = link.snapshot();
@@ -140,7 +140,7 @@ describe('core 客户端', () => {
   });
 
   it('本体拒绝握手时把原因留着，不假装连上了', async () => {
-    const core = createCore(createMockClient(), { version: 'test' });
+    const core = createCore(createMemoryRuntime(), { version: 'test' });
     const hello: ClientMessage = {
       t: 'hello',
       v: WIRE_VERSION + 99,
@@ -223,7 +223,7 @@ describe('core 客户端', () => {
   });
 
   it('本体起不来盖过协议不兼容：起不来才是更根本的那条', async () => {
-    const core = createCore(createMockClient(), { version: 'test' });
+    const core = createCore(createMemoryRuntime(), { version: 'test' });
     const hello: ClientMessage = {
       t: 'hello',
       v: WIRE_VERSION + 99,
@@ -271,7 +271,7 @@ describe('core 客户端', () => {
   });
 
   it('本体接上之后就不再拿「起不来」说事', async () => {
-    const core = createCore(createMockClient(), { version: 'test' });
+    const core = createCore(createMemoryRuntime(), { version: 'test' });
     const { link } = peer('pet', [], core);
     await vi.waitFor(() => expect(link.state()).toBe('ready'));
     expect(link.problem()).toBe('');
@@ -279,7 +279,7 @@ describe('core 客户端', () => {
   });
 
   it('同一个对话同时只允许一个写入 Run，第二个必须被本体拒绝', async () => {
-    const core = createCore(createMockClient(), { version: 'test' });
+    const core = createCore(createMemoryRuntime(), { version: 'test' });
     const pet = peer('pet', [], core);
     await vi.waitFor(() => expect(pet.link.state()).toBe('ready'));
     const desktop = peer('desktop', [], core);
@@ -291,7 +291,7 @@ describe('core 客户端', () => {
   });
 
   it('客户端只回答自己声明过的能力', async () => {
-    const core = createCore(createMockClient(), { version: 'test' });
+    const core = createCore(createMemoryRuntime(), { version: 'test' });
     const pet = peer('pet', [CAPABILITY.bubbleOpen], core);
     pet.link.expose(CAPABILITY.bubbleOpen, () => '打开了');
     const desktop = peer('desktop', [], core);
@@ -308,7 +308,7 @@ describe('core 客户端', () => {
     // 宠物进程有宠物窗口和对话条窗口，两者共用一根管道，因此**每个窗口都会
     // 收到 invoke**。对话条声明的能力是空的，若它抢先回一句「本客户端没有
     // 提供」，本体只认第一个回执，于是调用会被自己的另一块屏幕判死。
-    const core = createCore(createMockClient(), { version: 'test' });
+    const core = createCore(createMemoryRuntime(), { version: 'test' });
     const hello: ClientMessage = {
       t: 'hello',
       v: WIRE_VERSION,
@@ -382,7 +382,7 @@ describe('core 客户端', () => {
   it('异步能力要等它落地再回，不能把 Promise 当结果发出去', async () => {
     // 实机验收抓到的：多数能力要过壳，都是 async。直接发 Promise 会被
     // JSON.stringify 变成 `{}`，调用方拿到「成功 + 空对象」——比失败更难查。
-    const core = createCore(createMockClient(), { version: 'test' });
+    const core = createCore(createMemoryRuntime(), { version: 'test' });
     const pet = peer('pet', [CAPABILITY.bubbleOpen], core);
     pet.link.expose(
       CAPABILITY.bubbleOpen,
@@ -399,7 +399,7 @@ describe('core 客户端', () => {
   });
 
   it('能力失败要回失败，不能当成成功', async () => {
-    const core = createCore(createMockClient(), { version: 'test' });
+    const core = createCore(createMemoryRuntime(), { version: 'test' });
     const pet = peer('pet', [CAPABILITY.windowShow], core);
     pet.link.expose(CAPABILITY.windowShow, () =>
       Promise.reject(new Error('窗口打不开')),
@@ -413,7 +413,7 @@ describe('core 客户端', () => {
 
   it('目标没有声明这个能力时，由本体给出 NOT_FOUND 而不是窗口', async () => {
     // 能力存不存在是本体该回答的问题：它在转发前就校验过目标的声明。
-    const core = createCore(createMockClient(), { version: 'test' });
+    const core = createCore(createMemoryRuntime(), { version: 'test' });
     const pet = peer('pet', [CAPABILITY.bubbleOpen], core);
     pet.link.expose(CAPABILITY.bubbleOpen, () => '打开了');
     const cli = peer('cli', [], core);
@@ -424,7 +424,7 @@ describe('core 客户端', () => {
   });
 
   it('本体告诉每个客户端谁在线、谁装了', async () => {
-    const core = createCore(createMockClient(), {
+    const core = createCore(createMemoryRuntime(), {
       version: 'test',
       installed: ['pet'],
     });
@@ -438,7 +438,7 @@ describe('core 客户端', () => {
   });
 
   it('客户端断开后，本体不再把它算作在线', async () => {
-    const core = createCore(createMockClient(), { version: 'test' });
+    const core = createCore(createMemoryRuntime(), { version: 'test' });
     const pet = peer('pet', [], core);
     await vi.waitFor(() => expect(pet.link.state()).toBe('ready'));
     expect(core.roster()).toHaveLength(1);

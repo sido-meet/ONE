@@ -6,11 +6,23 @@ export * from './proposal.ts';
 export * from './page.ts';
 export * from './wire.ts';
 
-import type { Proposal, ProposalResolution } from './proposal.ts';
+import type {
+  Proposal,
+  ProposalDomain,
+  ProposalResolution,
+} from './proposal.ts';
 
 /** ONE-owned identities; external agent sessions are never conversation IDs. */
 export type AgentId = 'chat' | 'claude-code' | 'mcode';
-export type RunStatus = 'running' | 'completed' | 'cancelled' | 'failed';
+/**
+ * `interrupted` 不是失败，是**没人接的手**（ADR-028）。
+ *
+ * 本体崩在回复生成到一半时，重启后这次 Run 既不能说 `running`（界面会永远转圈），
+ * 也不能说 `completed`（那是谎称生成成功了）。用户没要求重跑，所以也不悄悄重跑 ——
+ * 那会产生一条他没见过的回复。
+ */
+export type RunStatus =
+  'running' | 'completed' | 'cancelled' | 'failed' | 'interrupted';
 export interface Workspace {
   id: string;
   name: string;
@@ -104,4 +116,84 @@ export interface ConversationRuntime {
     resolution: ProposalResolution,
   ): Promise<Proposal>;
   dispose(): void;
+}
+
+/**
+ * Agent 端口：**只回答「说什么」，不持有任何状态**（ADR-028）。
+ *
+ * 这是这轮最要紧的一条边界。对话、事件、Run、提议全归本体；Agent 拿到的是
+ * 「这句话 + 上一条回复」，交回来的是「这段话 + 顺带起草的提议」。
+ *
+ * 没有这条边界时，「模拟回复」和「会话状态机」是同一个东西，于是换个真实模型
+ * 就等于把会话历史一起换掉 —— 而对话是 ONE 自己的数据。
+ *
+ * `draft` 是可选的：交回来就落一条待确认的提议（ADR-022），不交就只是回一句话。
+ */
+export interface ReplyAgent {
+  readonly id: AgentId;
+  readonly name: string;
+  reply(input: {
+    text: string;
+    /** 上一条 assistant 回复。笔记的「把刚才那段记下来」要靠它。 */
+    lastReply: string | undefined;
+  }): Promise<{
+    content: string;
+    draft?: { domain: ProposalDomain; draft: Proposal['draft'] };
+  }>;
+}
+
+/**
+ * 会话存储端口。**事件是唯一真相；对话、Run、提议都是投影**（ADR-028）。
+ *
+ * 「投影」不是修辞，它是有约束的：
+ * - 运行时**只**追加事件，不另存一份 Run 或提议的权威状态 —— 两份真相必然漂移；
+ * - `appendBatch` 分配的 `seq` **不重复也不跳号**，`(conversationId, seq)` 上有唯一
+ *   约束；「重连快照无缺失无重复」的根据就在这条约束上；
+ * - 一批事件**同事务**写入：一次 Run 的「开始」与「结束」要么都在，要么都不在。
+ *
+ * 两份实现（内存与 SQLite）跑**同一组契约测试** —— 换掉存储不等于换掉状态机。
+ */
+export interface ConversationStore {
+  /** 开库时调用一次：把库里已有的状态读出来。 */
+  open(): ConversationState;
+  /**
+   * 一批事件同事务写入，按数组顺序分配 `seq`。
+   *
+   * 要「开始」和「结束」成对时传两个 payload，不要分两次调用 —— 那两次之间崩了，
+   * 库里就留下一条永远不结束的 Run。
+   */
+  appendBatch(
+    conversationId: string,
+    payloads: DurablePayloadInput[],
+  ): DurableEvent[];
+  createConversation(conversation: Conversation): void;
+  /** 改对话的 Agent，**与那条 `agent.changed` 事件同事务** —— 分开写就会出现「说换了但没换」。 */
+  setConversationAgent(
+    conversationId: string,
+    agentId: AgentId,
+    payload: DurablePayloadInput,
+  ): DurableEvent;
+  close(): void;
+}
+
+/** 存储里读出来的原始状态。运行时据此投影出 Snapshot 的其余部分。 */
+export interface ConversationState {
+  workspaces: Workspace[];
+  conversations: Conversation[];
+  events: DurableEvent[];
+}
+
+/** `appendBatch` 收得到的事件载荷（还不带 id/seq/时间戳，那些由存储分配）。 */
+export type DurablePayloadInput =
+  | { type: 'message.created'; message: Message }
+  | { type: 'agent.changed'; agentId: AgentId }
+  | { type: 'run.started'; run: Run }
+  | { type: 'run.finished'; run: Run }
+  | { type: 'proposal.created'; proposal: Proposal }
+  | { type: 'proposal.settled'; resolution: ProposalResolution };
+
+/** Agent 起草的东西，落成提议时用。 */
+export interface ProposalDraft {
+  domain: ProposalDomain;
+  draft: Proposal['draft'];
 }

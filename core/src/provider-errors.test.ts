@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   createMemoryProviders,
-  createMockClient,
+  createMemoryRuntime,
 } from '../../packages/mock-runtime/src/index.ts';
 import type { MemoryProviders } from '../../packages/mock-runtime/src/index.ts';
 import type {
@@ -175,7 +175,7 @@ describe('core dispatching domain commands', () => {
       slot;
 
   const connect = (domains?: (p: MemoryProviders) => DomainPorts) => {
-    runtime = createMockClient();
+    runtime = createMemoryRuntime();
     providers = createMemoryProviders();
     core = createCore(runtime, {
       version: 'test',

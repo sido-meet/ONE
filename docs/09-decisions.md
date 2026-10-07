@@ -520,3 +520,40 @@ export type ClientKind = 'pet' | 'desktop' | 'cli';
 实机（真数据）：0.1 的 `local.calendar.json`（2 条日程、1 条审计、7 条回执）与 `local.notes.json`（2 条笔记、1 条审计、9 条回执）导入 `local.db`，**22 行逐字段与旧文件比对全部一致**；两个旧文件改名成 `.migrated`，大小与时间戳未变。强杀 core 与提供方后重启，数据完好（WAL 自动恢复），`schema_migrations` 仍是 v1/v2 两行、没有重跑。`backupTo` 导出的快照可独立打开并读到 3 条笔记、2 条日程。
 
 **迁移影响**：`packages/provider-local/src/store.ts` 删除；新增 `db.ts`（开库、pragma、迁移、事务、备份）、`legacy.ts`（旧 JSON 的**只读**解析器）、`repository.ts`（SQL 仓储）。`provider.ts` 收窄成「解析输入 + 委派仓储」，不再持有内存副本。协议没变，不升 `WIRE_VERSION`。
+
+---
+
+## ADR-028：对话归本体，Agent 只负责「说什么」
+
+**状态**：2026-10（0.2.0-dev）**已实现**（R03）
+
+**问题**：0.1 的会话状态整块活在 `packages/mock-runtime` 的一个 `state` 对象里：对话、事件、Run、提议全在里面。`core.ts` 对它是**纯透传** —— `sendMessage` 直接转给运行时，`getSnapshot` 直接转给运行时。后果是：
+
+1. **本体一重启，全部对话归零。** 用户看到的是「我刚才说过的话没了」，而本体没有任何理由该这样：数据明明在同一个磁盘上。
+2. **「对话归 ONE 所有」这条边界在代码里是空的。** 边界写在纸上，写状态的却是模拟运行时。换成真实 Agent 时，要么把持久化一起重写一遍，要么让真实 Agent 去管 ONE 的会话历史 —— 后者正是「不得用外部 session ID 替代 conversationId」要防的事。
+3. **运行时边界和「模拟」缠在一起。** 现在「模拟回复」和「会话状态机」是同一个东西，于是没法只换掉模拟、留下状态机。
+
+**选择**：
+
+1. **本体持有会话存储，Agent 只回答「说什么」。** 新增 `ReplyAgent` 端口：给一段用户输入和上一条回复，返回 `{ content, draft? }`。`createConversationRuntime(store, agent)` 是**唯一**的运行时实现，会话、事件、Run、提议全归它管；模拟只贡献一个 `ReplyAgent`。接真实模型时实现的是那一个函数，不是重写会话状态机。
+
+2. **一个运行时，两个 Store 实现，共用契约测试。** `ConversationStore` 是端口：生产用 SQLite（`<数据目录>/core.db`），测试用内存实现。这正是日历/笔记那套 `CalendarProvider` / `NotesProvider` 的做法 —— 换掉存储不等于换掉状态机，而且两份实现跑同一组契约测试。
+
+3. **两个库文件，两个主人。** `core.db` 归本体（对话），`local.db` 归本地提供方（领域数据，ADR-027）。不合成一个文件：所有者不同，合成一个就意味着本体要写提供方的 schema，而 ADR-016 的界线（本体是领域能力唯一调用方，不是领域数据的持有者）正是靠「谁的数据谁存」划出来的。
+
+4. **事件是唯一真相，快照是从事件投影出来的。** `conversation_events` 上有唯一索引 `(conversation_id, seq)`，**seq 不重复也不跳号** —— 「重连快照无缺失无重复」的根据就在这条约束上。`runs` 与 `proposals` 都是投影结果，不另设一份权威状态。
+
+5. **流式半截回复不落库。** `drafts` 不是持久历史（项目约定：token delta 不当永久历史）。Run 跑完才整条落 `message.created`。
+
+6. **本体崩了，正在跑的那次 Run 回来是 `interrupted`。** 不是 `running`（那会让界面永远转圈），不是 `completed`（那是谎称生成成功了），也不是悄悄重跑（用户没要求重跑，而且会产生一条他没见过的回复）。为此给 `RunStatus` 加了 `interrupted`，界面渲染成「回复中断」。
+
+7. **快照在内存里缓存，启动时从库里重建。** 多窗口重连时广播的是这份缓存，不每次查库；`seq` 从库里读，不从计数器猜。
+
+**备选**：
+
+- **给现有运行时注入一个持久化端口，状态所有权不动**：改动小一半，但「对话归 ONE 所有」在代码里还是空的，换真实 Agent 时持久化要跟着重写一遍。那条边界会一直只活在文档里。
+- **复用 `local.db` 一份库**：省一个文件，但本体就要写提供方的表。哪天提供方换成日历插件（比如它自带云同步），本体就被绑在别人的 schema 上。
+
+**协议影响**：`RunStatus` 新增 `interrupted`。**不升 `WIRE_VERSION`** —— 旧客户端收到它只是不匹配任何渲染分支（不会转圈、不会崩），且壳与本体总是同一棵树构建出来，没有独立的旧客户端。
+
+**迁移影响**：新增 `core/src/conversation/runtime.ts`（唯一运行时）、`core/src/conversation/store-sqlite.ts`；`packages/mock-runtime` 的 `index.ts` 拆成 `agent.ts`（模拟回复）+ `store-memory.ts`（内存 Store），`createMockClient` 改名为 `createMemoryRuntime`（30 处引用同步改）；`core/src/index.ts` 装配 SQLite Store，测试装配内存 Store。

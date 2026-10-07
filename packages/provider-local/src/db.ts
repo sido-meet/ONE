@@ -1,6 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
-import path from 'node:path';
+import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import {
+  openSqlite,
+  transaction,
+  backupTo as vacuumInto,
+} from '../../sqlite/src/index.ts';
 import { readLegacyData } from './legacy.ts';
 
 /**
@@ -50,24 +54,11 @@ export function openDatabase(
   file: string,
   legacy: readonly string[] = [],
 ): LocalDatabase {
-  mkdirSync(path.dirname(file), { recursive: true });
-  const db = new DatabaseSync(file);
-
-  // WAL：读写不互相阻塞，而且提交是先写日志再改主文件，断电时最多丢最后一条。
-  // 外键在这里用不到（表之间没有引用），但显式关掉免得以后有人改了 pragma 才发现行为变了。
-  db.exec('PRAGMA journal_mode = WAL');
-  db.exec('PRAGMA synchronous = FULL');
-  db.exec('PRAGMA foreign_keys = ON');
-  // 另一个进程短暂占着库时先等，而不是立刻抛 SQLITE_BUSY。本机一般只有一个写者，
-  // 但用户完全可能开两个 ONE。
-  db.exec('PRAGMA busy_timeout = 5000');
-
-  const backupTo = (target: string) => {
-    mkdirSync(path.dirname(target), { recursive: true });
-    // VACUUM INTO 而不是直接拷文件：拷文件会把 WAL 里还没并回主文件的部分落下，
-    // 备份出来的是**某个时刻的完整快照**，而不是「主文件 + 碰运气凑出来的 -wal」。
-    db.exec(`VACUUM INTO '${target.replaceAll("'", "''")}'`);
-  };
+  // pragma 与事务助手在 `packages/sqlite`（ADR-028）：本体与提供方各有一个库，
+  // 两边配置必须一模一样，分开写迟早有一处会漂。
+  const opened = openSqlite(file);
+  const db = opened.db;
+  const backupTo = (target: string) => vacuumInto(db, target);
 
   const applied = readAppliedVersions(db);
   const pending = pendingVersions(db);
@@ -97,41 +88,20 @@ export function openDatabase(
     file,
     backup,
     backupTo,
+    // 幂等的关法在 `packages/sqlite` 里（两个库共用一份实现）。
     close: () => {
-      // 关两次就当没关过。SIGINT 与管道断开可能先后到达，退出路径也会顺手再调一次 ——
-      // 一个只该清理一次的收尾动作，不该在第二次调用时把进程带崩。
       if (closed) return;
       closed = true;
-      db.close();
+      opened.close();
     },
   };
 }
 
 /**
- * 把 `fn` 包在一个事务里。
- *
- * 用 `BEGIN IMMEDIATE` 而不是默认的 `BEGIN`：默认那一档是「用到才升级锁」，两个写者
- * 同时开始时会在中途才发现撞车，整段白做。IMMEDIATE 在开头就把写锁拿走，撞车的那一方
- * 立刻去等 `busy_timeout`。
- *
- * 嵌套调用不加判断 —— 仓储里的写操作各自是完整的一笔，没有「事务里再开事务」这回事；
- * 真有的话 SQLite 会直接报错，比悄悄变成两笔事务好。
+ * 把 `fn` 包在一个事务里 —— 与本体共用同一份实现（`packages/sqlite`）。
+ * 这里是再导出一次，免得仓储的 import 路径全变。
  */
-export function transaction<T>(db: DatabaseSync, fn: () => T): T {
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    const result = fn();
-    db.exec('COMMIT');
-    return result;
-  } catch (error) {
-    try {
-      db.exec('ROLLBACK');
-    } catch {
-      // 回滚本身失败（比如连接已经断了）不能盖掉真正的错误 —— 那才是用户要看的。
-    }
-    throw error;
-  }
-}
+export { transaction };
 
 /** schema_migrations 是记账的表，它自己得先在。 */
 function ensureMigrationsTable(db: DatabaseSync) {

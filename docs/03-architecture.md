@@ -79,6 +79,24 @@ flowchart TB
 | Agent Connector                  | start/cancel/resume/能力探测         | 绕过权限访问系统           |
 | Domain Service                   | 日程/笔记校验、幂等与版本            | UI 样式与协议解析          |
 
+## 代码树与所有权（ADR-028）
+
+**两个库文件、两个主人。** 合成一个看起来省事，但所有者不同：本体一旦要写提供方的表，就等于跨过了 ADR-016 划的那条线。
+
+| 目录                          | 谁在 import 它   | 里面是什么                               |
+| ----------------------------- | ---------------- | ---------------------------------------- |
+| `packages/contracts/src`      | 所有人           | 类型与端口。**只有端口，没有实现**       |
+| `packages/conversation/src`   | 本体、模拟运行时 | 会话状态机（唯一实现）与 SQLite 版 Store |
+| `packages/sqlite/src`         | 本体、提供方     | pragma、事务助手、`VACUUM INTO` 备份     |
+| `packages/mock-runtime/src`   | 本体装配、测试   | 模拟 Agent + 内存 Store。**不含状态机**  |
+| `packages/provider-local/src` | 本体（经管道）   | 日历与笔记的实现与 `local.db`            |
+
+**`packages/conversation` 为什么独立于 `core`**：状态机既被本体用，也被测试与 `src/lib/client.ts` 用。挂在 `core/` 底下的话，mock-runtime 就得反向 import core，而 core 的装配点又要 import mock-runtime —— 一个环。放在中立位置，两个方向都只朝 contracts 看。
+
+**`packages/sqlite` 为什么独立**：pragma 是**每连接**的设置，`transaction` 的语义是契约（`BEGIN IMMEDIATE`）。本体与提供方各有一个库，写两遍迟早漂，而漂的那一处正好是「两个库行为不一样」，最难查。
+
+**端口住在 contracts，住在中立包，不住在调用方**：`ConversationRuntime` 与 `ReplyAgent` 在 contracts，`ConversationStore` 也在 contracts。谁实现它们由装配点决定，本体不知道「模拟」是什么。
+
 ## 事件与一致性
 
 - 单对话一个活动 Run，不同对话可以独立执行；本体与 Mock 都遵守。

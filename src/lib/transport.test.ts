@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createMockClient } from '../../packages/mock-runtime/src/index';
+import { createMemoryRuntime } from '../../packages/mock-runtime/src/index';
 import { createCore } from '../../core/src/core';
 import { CAPABILITY, WIRE_VERSION } from '../../packages/contracts/src/wire';
 import type { ClientMessage } from '../../packages/contracts/src/wire';
@@ -17,7 +17,7 @@ describe('一根管道只有一次握手', () => {
     // 实机踩到：插件页面窗口与宠物主窗口共用一根管道，两个窗口各握一次手，
     // 本体只认第一次 —— 只读窗口既拿不到回执，也等不到下一次握手，
     // 于是永远停在「ONE 本体未连接」。
-    const core = createCore(createMockClient(), { version: 'test' });
+    const core = createCore(createMemoryRuntime(), { version: 'test' });
     const hello: ClientMessage = {
       t: 'hello',
       v: WIRE_VERSION,
@@ -73,7 +73,7 @@ describe('一根管道只有一次握手', () => {
   });
 
   it('主窗口照旧握手一次', async () => {
-    const core = createCore(createMockClient(), { version: 'test' });
+    const core = createCore(createMemoryRuntime(), { version: 'test' });
     const hello: ClientMessage = {
       t: 'hello',
       v: WIRE_VERSION,
@@ -110,7 +110,7 @@ describe('一根管道只有一次握手', () => {
 });
 
 function setup() {
-  const core = createCore(createMockClient(), { version: 'test' });
+  const core = createCore(createMemoryRuntime(), { version: 'test' });
   const hello: ClientMessage = {
     t: 'hello',
     v: WIRE_VERSION,

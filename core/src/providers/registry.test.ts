@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createMockClient } from '../../../packages/mock-runtime/src/index.ts';
+import { createMemoryRuntime } from '../../../packages/mock-runtime/src/index.ts';
 import { WIRE_VERSION } from '../../../packages/contracts/src/wire.ts';
 import type { CoreMessage } from '../../../packages/contracts/src/index.ts';
 import { createCore } from '../core.ts';
@@ -22,7 +22,7 @@ const CALENDAR_ABILITIES = [
 ];
 
 function setup() {
-  const core: Core = createCore(createMockClient(), {
+  const core: Core = createCore(createMemoryRuntime(), {
     version: 'test',
     installed: ['local.calendar'],
   });
@@ -99,7 +99,7 @@ describe('提供方注册表', () => {
    * 把好端端的日历判成「没授权」—— 一个只给笔记加能力的动作，弄坏了另一个域。
    */
   it('笔记要 get，日历不要 —— 两份动作表不是冗余', () => {
-    const notesCore: Core = createCore(createMockClient(), {
+    const notesCore: Core = createCore(createMemoryRuntime(), {
       version: 'test',
       installed: ['local.notes', 'local.calendar'],
     });
