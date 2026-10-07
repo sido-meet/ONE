@@ -10,6 +10,7 @@ use tauri::{
 };
 
 use crate::core_link::CoreLink;
+use crate::frames;
 
 /**
  * 插件页面托管（ADR-018）。
@@ -190,12 +191,7 @@ fn serve(app: &AppHandle, uri: &str) -> Response<Vec<u8>> {
             "ONE 本体桥接还没准备好，稍后再试。",
         );
     };
-    let frame = json!({
-        "t": "page.read",
-        "id": link.next_shell_request(),
-        "provider": target.provider,
-        "path": target.path,
-    });
+    let frame = frames::page_read(&link.next_shell_request(), &target.provider, &target.path);
     let resource = match link.request(frame, PAGE_TIMEOUT) {
         Ok(value) => value,
         Err(failure) => return text_page(status_for(&failure.code), &failure.message),
@@ -243,13 +239,35 @@ pub fn install(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry
     })
 }
 
+/// 本体那份「装了什么」。菜单里每一项存在与否都由它决定（ADR-018 的分工）。
+///
+/// 与 `connected_views` 走同一根管道、同一份真相，所以两次问不会给出互相矛盾的答案。
+pub fn installed_ids(app: &AppHandle) -> Vec<String> {
+    let Some(link) = app.try_state::<CoreLink>() else {
+        return Vec::new();
+    };
+    let frame = frames::clients_list(&link.next_shell_request());
+    let Ok(list) = link.request(frame, ROSTER_TIMEOUT) else {
+        return Vec::new();
+    };
+    list.get("installed")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// 已连上、并且自己申报了页面的参与者。菜单要靠它才知道能开哪些窗口 —— 宿主是唯一
 /// 知道「装了什么、谁在跑」的地方（ADR-018 的分工）。
 pub fn connected_views(app: &AppHandle) -> Vec<(String, String)> {
     let Some(link) = app.try_state::<CoreLink>() else {
         return Vec::new();
     };
-    let frame = json!({ "t": "clients.list", "id": link.next_shell_request() });
+    let frame = frames::clients_list(&link.next_shell_request());
     let Ok(list) = link.request(frame, ROSTER_TIMEOUT) else {
         return Vec::new();
     };

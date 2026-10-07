@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod core_link;
+mod frames;
 mod layout;
 mod plugin;
 
@@ -10,7 +11,7 @@ use std::time::Duration;
 use layout::{Placement, Rect, Side};
 use serde_json::{json, Value};
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, Submenu},
     AppHandle, Emitter, Manager, PhysicalPosition, State, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
@@ -694,16 +695,13 @@ fn core_answer(link: State<'_, core_link::CoreLink>, frame: Value) -> Result<(),
 #[tauri::command]
 fn core_hello(link: State<'_, core_link::CoreLink>) -> Value {
     let status = link.status();
-    json!({
-        "t": "hello",
-        "v": status.wire_version,
-        "client": {
-            "role": status.role,
-            "provider": status.provider,
-            "label": status.label,
-            "capabilities": status.capabilities,
-        },
-    })
+    frames::hello(
+        status.wire_version,
+        &status.role,
+        &status.provider,
+        &status.label,
+        &status.capabilities,
+    )
 }
 
 /// 启动本体。宠物是默认安装的那个客户端，但两端都需要它活着。
@@ -845,33 +843,57 @@ fn build_windows(app: &AppHandle, client: ClientKindArg) -> Result<(), String> {
 /// 定义一次给两处用，否则两边的清单迟早走偏。
 /// 客户端之间不直接 spawn：启动和请宠物做事都经本体，只有本体知道装了什么、
 /// 谁连着。
+/// 菜单上的一项：id 决定点了做什么，label 是用户看到的中文。
+struct Entry {
+    id: String,
+    label: String,
+}
+
+/// 宠物菜单**先定清单，再照清单造菜单**。分两步只为让清单本身能测 —— 它不需要
+/// AppHandle，也不需要管道，就是几个字符串。
+///
+/// 「点了没反应」是这个菜单上一路挖出来的洞（实机）：「打开 ONE 桌面端」原来是无条件
+/// 给的，而 `desktop` 默认不在安装清单里 —— 本体于是每次都诚实回答「desktop 还没有
+/// 安装」，界面上只剩一片沉默。它跟插件项受同一条规矩：装了才给入口，
+/// `core install desktop` 之后它就出现了。
+fn pet_menu_entries(installed: &[String], views: &[(String, String)]) -> Vec<Entry> {
+    let mut entries: Vec<Entry> = Vec::new();
+    if installed.iter().any(|id| id == "desktop") {
+        entries.push(Entry {
+            id: LAUNCH_DESKTOP.into(),
+            label: "打开 ONE 桌面端".into(),
+        });
+    }
+    for (provider, label) in views {
+        entries.push(Entry {
+            id: format!("{PLUGIN_ITEM}{provider}"),
+            label: format!("打开{label}页面"),
+        });
+    }
+    entries.push(Entry {
+        id: PET_SUMMARY.into(),
+        label: "今天的摘要".into(),
+    });
+    entries.push(Entry {
+        id: RESTART_CORE.into(),
+        label: "重新启动 ONE 本体".into(),
+    });
+    entries.push(Entry {
+        id: QUIT.into(),
+        label: "退出".into(),
+    });
+    entries
+}
+
 fn pet_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-    let launch = MenuItem::with_id(app, LAUNCH_DESKTOP, "打开 ONE 桌面端", true, None::<&str>)?;
-    // 菜单每次弹出时现问本体「谁带着页面」。宿主是唯一知道装了什么的角色，
+    // 菜单每次弹出时现问本体「装了什么、谁在跑」。宿主是唯一知道装了什么的角色，
     // 所以没装或没运行的插件这里**不会出现** —— 不拿一个点了打不开的入口充数。
     // 三态的引导归摘要条（ADR-018），菜单只负责在场。
-    let plugins: Vec<MenuItem<tauri::Wry>> = plugin::connected_views(app)
+    let entries = pet_menu_entries(&plugin::installed_ids(app), &plugin::connected_views(app));
+    let owned: Vec<MenuItem<tauri::Wry>> = entries
         .into_iter()
-        .map(|(provider, label)| {
-            MenuItem::with_id(
-                app,
-                format!("{PLUGIN_ITEM}{provider}"),
-                format!("打开{label}页面"),
-                true,
-                None::<&str>,
-            )
-        })
+        .map(|entry| MenuItem::with_id(app, entry.id.as_str(), entry.label.as_str(), true, None::<&str>))
         .collect::<tauri::Result<_>>()?;
-    let restart = MenuItem::with_id(app, RESTART_CORE, "重新启动 ONE 本体", true, None::<&str>)?;
-    // 摘要条走壳命令而不是能力调用：它是这只宠物自己的另一块屏幕，不是
-    // 另一个参与者的事，也没有第二个进程可以回话。
-    let summary = MenuItem::with_id(app, PET_SUMMARY, "今天的摘要", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, QUIT, "退出", true, None::<&str>)?;
-    let mut owned = vec![launch];
-    owned.extend(plugins);
-    owned.push(summary);
-    owned.push(restart);
-    owned.push(quit);
     let items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = owned
         .iter()
         .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
@@ -879,12 +901,27 @@ fn pet_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     Menu::with_items(app, &items)
 }
 
+/**
+ * 桌面端的窗口菜单栏。
+ *
+ * **顶层必须是 `Submenu`。** 实机挖出来的：原来这里直接摆四个 `MenuItem`，菜单栏
+ * 照画不误（截图里四个字都在），但**一个字都点不动**。原因是 muda 只给子菜单插
+ * `MF_POPUP`，普通项插的是 `MF_STRING`（muda `platform_impl/windows/mod.rs`
+ * `attach_item`）—— 菜单栏上的项必须是弹窗，点击才会开下拉；不是弹窗的项只会被
+ * 画出来，不会有任何反应。
+ *
+ * 宠物的右键菜单不受影响：那是**弹出菜单**，普通项在弹出菜单里本来就是对的。
+ * 同一份 `Menu` 用在哪，决定了它该由什么组成 —— 这也是它当初看起来没问题的地方。
+ *
+ * 所以这里收成一个「ONE」下拉，四条命令都放进去。
+ */
 fn desktop_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let launch = MenuItem::with_id(app, LAUNCH_PET, "启动 ONE 宠物", true, None::<&str>)?;
     let bubble = MenuItem::with_id(app, PET_BUBBLE, "呼出宠物对话条", true, None::<&str>)?;
     let show = MenuItem::with_id(app, PET_SHOW, "显示宠物", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, QUIT, "退出", true, None::<&str>)?;
-    Menu::with_items(app, &[&launch, &bubble, &show, &quit])
+    let one = Submenu::with_items(app, "ONE", true, &[&launch, &bubble, &show, &quit])?;
+    Menu::with_items(app, &[&one])
 }
 
 /// Only the window a client owns itself carries the window menu. Setting it on
@@ -913,19 +950,14 @@ fn launch_through_core(app: &AppHandle, kind: &str) {
     if let Err(error) = core_link::start_core(app) {
         eprintln!("one: 无法启动本体：{error}");
     }
-    let frame = json!({ "t": "clients.launch", "id": shell_request_id(app), "kind": kind });
+    let frame = frames::clients_launch(&shell_request_id(app), kind);
     if let Err(error) = core_link::send_command(app, frame) {
         eprintln!("one: 请本体拉起 {kind} 失败：{error}");
     }
 }
 
 fn call_pet_through_core(app: &AppHandle, capability: &str) {
-    let frame = json!({
-        "t": "capability.call",
-        "id": shell_request_id(app),
-        "target": "pet",
-        "capability": capability,
-    });
+    let frame = frames::capability_call(&shell_request_id(app), "pet", capability);
     if let Err(error) = core_link::send_command(app, frame) {
         eprintln!("one: 请宠物执行 {capability} 失败：{error}");
     }
@@ -967,6 +999,7 @@ fn main() {
         .manage(identity)
         .manage(plugin::PluginWindows::default())
         .manage(Follower::default())
+        .manage(core_link::CoreProcess::new())
         .setup(move |app| {
             let handle = app.handle().clone();
             // 顺序很重要。先装好本体桥接，再开窗：窗口一创建，页面就会立刻调用
@@ -1033,7 +1066,7 @@ fn main() {
             app.on_menu_event(|app, event| match menu_action(event.id().as_ref()) {
                 Some(MenuAction::Launch(kind)) => launch_through_core(app, kind),
                 Some(MenuAction::RestartCore) => {
-                    if let Err(error) = core_link::start_core(app) {
+                    if let Err(error) = core_link::restart_core(app) {
                         eprintln!("one: 本体没有启动：{error}");
                     }
                 }
@@ -1082,8 +1115,16 @@ fn main() {
             force_quit,
             shell_commands
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run ONE client");
+        .build(tauri::generate_context!())
+        .expect("failed to build ONE client")
+        .run(|app, event| {
+            // 退出的**唯一**收口。放在这里而不是 `quit_app` 里，是因为退出有好几条路
+            // （菜单、界面关窗、界面取消完 Run 后强退），每条都自己记得清理一次，
+            // 迟早漏一条 —— 而漏掉的那条就是用户下次开机发现本体还在后台。
+            if let tauri::RunEvent::Exit = event {
+                core_link::stop_core(app);
+            }
+        });
 }
 
 #[cfg(test)]
@@ -1132,6 +1173,51 @@ mod tests {
             assert!(menu_action(id).is_some(), "菜单项 {id} 没有对应动作");
         }
         assert_eq!(menu_action("没有这个菜单项"), None);
+    }
+
+    #[test]
+    fn the_pet_menu_only_offers_entrances_that_are_actually_installed() {
+        // 实机挖出来的洞：「打开 ONE 桌面端」原来是无条件给的，而 desktop 默认不在
+        // 安装清单里，点下去本体每次都答「还没有安装」—— 界面上只剩点了没反应。
+        let ids = |installed: &[&str], views: &[(&str, &str)]| {
+            let installed: Vec<String> = installed.iter().map(|s| s.to_string()).collect();
+            let views: Vec<(String, String)> = views
+                .iter()
+                .map(|(provider, label)| (provider.to_string(), label.to_string()))
+                .collect();
+            pet_menu_entries(&installed, &views)
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>()
+        };
+        let views = [("local.calendar", "本地日历"), ("local.notes", "本地笔记")];
+
+        assert_eq!(
+            ids(&["local.calendar", "local.notes", "pet"], &views),
+            vec![
+                format!("{PLUGIN_ITEM}local.calendar"),
+                format!("{PLUGIN_ITEM}local.notes"),
+                PET_SUMMARY.to_string(),
+                RESTART_CORE.to_string(),
+                QUIT.to_string(),
+            ],
+            "没装 desktop 时菜单里不该出现「打开 ONE 桌面端」"
+        );
+
+        let with_desktop = [
+            "local.calendar",
+            "local.notes",
+            "pet",
+            "desktop",
+        ];
+        assert_eq!(
+            ids(&with_desktop, &views)[0],
+            LAUNCH_DESKTOP,
+            "装上 desktop 之后入口就该出现（core install desktop）"
+        );
+
+        // 问不到清单（本体没起来）时同样不给：宁可少一个入口，不要一个打不开的。
+        assert!(!ids(&[], &views).contains(&LAUNCH_DESKTOP.to_string()));
     }
 
     #[test]

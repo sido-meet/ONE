@@ -8,12 +8,16 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
-use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+use windows_sys::Win32::System::Threading::{
+    GetExitCodeProcess, OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_TERMINATE,
+};
 
 /// ONE 本体在 Windows 上是命名管道，不是端口。WebView 不能直接开套接字，
 /// 因此这一层是 webview 与本体之间唯一可信的桥：客户端仍然拿不到套接字。
@@ -34,6 +38,119 @@ const CORE_ENTRY: &str = "core/src/index.ts";
 /// 可分发产物的目录名与清单文件名。清单是壳的唯一依据：靠猜会猜错。
 const RUNTIME_DIR: &str = "dist-runtime";
 const RUNTIME_MANIFEST: &str = "core-runtime.json";
+/// 结束本体后等它真的走掉的上限。管道要等进程彻底退出才释放，「重新启动」紧接着
+/// 起新本体时抢的就是它；但也不能无限等 —— 退不出去时要有话说，而不是把应用卡死。
+const CORE_STOP_GRACE: Duration = Duration::from_millis(3000);
+const CORE_STOP_POLL: Duration = Duration::from_millis(20);
+
+// ───────────────────────── 本体进程的生死 ─────────────────────────
+//
+// 壳拉起本体，本体是壳的子进程；于是**壳也就该是唯一决定它什么时候结束的一方**。
+//
+// 这条以前是缺的，而缺的时候看不出问题：壳退出后本体确实消失了。查下来那不是设计，
+// 是巧合 —— 壳把 stderr 接成管道，壳一死管道就断，本体正好要往 stderr 写一行
+// 「参与者断开」，于是撞上 EPIPE 崩掉。**它能不能退，取决于那一刻它恰好要不要说话。**
+// 实机对照过：本体单独跑（stderr 不经壳转发）时客户端断开后它一直活着。
+//
+// 顺带修好一个点了没反应的按钮：「重新启动 ONE 本体」原来只是再 spawn 一个，
+// 那个新的撞上 EADDRINUSE 立刻退出，界面上什么也不变。
+
+/// 壳自己拉起来的那个本体的 pid。只记 pid 不记 `Child`：等待线程要独占 Child 才能
+/// `wait()`，而「退出时杀掉它」发生在另一条线程上 —— 记所有权就等于两边抢。
+pub struct CoreProcess(Mutex<Option<u32>>);
+
+impl CoreProcess {
+    pub fn new() -> Self {
+        CoreProcess(Mutex::new(None))
+    }
+
+    fn get(&self) -> Option<u32> {
+        *self.0.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn set(&self, pid: u32) {
+        *self.0.lock().unwrap_or_else(|error| error.into_inner()) = Some(pid);
+    }
+
+    fn take(&self) -> Option<u32> {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+    }
+}
+
+/// `GetExitCodeProcess` 对「还活着」的进程返回这个值。真值不重要，重要的是它不等于
+/// 任何一个真实的退出码。
+const STILL_ACTIVE: u32 = 259;
+
+/// 这个 pid 上的进程还在跑吗。
+///
+/// **不能只看 `OpenProcess` 能不能开。** 进程被杀之后、父进程还没回收它之前，它会以
+/// 「已终止但对象还在」的状态留着，句柄照样开得到 —— 于是「杀掉了」会被读成「还活着」。
+/// 实机抓到的：终止后 5 秒里 `OpenProcess` 次次都成功，于是 stop_core 每次都以为没杀掉。
+/// 退出码才是判据：终止之后它给的是退出码，不再是 STILL_ACTIVE。
+fn alive(pid: u32) -> bool {
+    // SAFETY: 句柄用完立刻关，不跨线程传递；`code` 由调用方提供且有效。
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            // 句柄都拿不到：进程不存在，或者权限不够 —— 两种都不该由我们去补刀。
+            return false;
+        }
+        let mut code: u32 = 0;
+        let known = GetExitCodeProcess(handle, &mut code);
+        CloseHandle(handle);
+        known != 0 && code == STILL_ACTIVE
+    }
+}
+
+/// 结束进程。返回有没有真的下过手。
+fn terminate(pid: u32) -> bool {
+    // SAFETY: 同上；TerminateProcess 要求 PROCESS_TERMINATE 权限，所以这里单独开一次。
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let killed = TerminateProcess(handle, 0);
+        CloseHandle(handle);
+        killed != 0
+    }
+}
+
+/// 收掉壳拉起来的本体。**只杀本体自己**：提供方是它以 detached 起的，而且管道一断
+/// 它们会自己退场（`packages/provider-local/src/main.ts`）。本体去管别人的孩子是越界。
+pub fn stop_core(app: &AppHandle) {
+    let Some(state) = app.try_state::<CoreProcess>() else {
+        return;
+    };
+    let Some(pid) = state.take() else {
+        return;
+    };
+    if !alive(pid) {
+        // 它自己先走了（比如本体认不出管道被别人占了而退出）。这不是错误，也不用报。
+        return;
+    }
+    if !terminate(pid) {
+        eprintln!("one: 没能结束本体（pid {pid}），它可能会留在后台占着管道");
+        return;
+    }
+    let deadline = Instant::now() + CORE_STOP_GRACE;
+    while alive(pid) && Instant::now() < deadline {
+        thread::sleep(CORE_STOP_POLL);
+    }
+    if alive(pid) {
+        eprintln!("one: 本体（pid {pid}）没有在期限内退出，管道可能被它占着");
+    }
+}
+
+/// 「重新启动 ONE 本体」。先真的停掉再起 —— 只起不停的那个会立刻 EADDRINUSE 作废，
+/// 于是这个按钮从上线起就没做过任何事。
+pub fn restart_core(app: &AppHandle) -> Result<(), String> {
+    stop_core(app);
+    start_core(app)
+}
 
 /// 本体该怎么起来。这是 R02 之后**唯一**一处决定本体进程的东西。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,6 +326,24 @@ fn note_core_problem(app: &AppHandle, text: String) {
 /// （ADR-021）。收 `AppHandle` 而不是 `&CoreLink`/`State`，是因为下面那条
 /// 线程里的 `spawn` 失败也要走同一条通知路径。
 pub fn start_core(app: &AppHandle) -> Result<(), String> {
+    // 已经有一个**自己拉起来的**本体在跑就别再拉一个：第二个撞上 EADDRINUSE 会立刻
+    // 作废退出，界面上什么也不变。菜单里「启动 ONE 宠物」「重新启动 ONE 本体」都走
+    // 这里，所以这条不是优化，是别让用户看见一个点了没反应的按钮。
+    if let Some(state) = app.try_state::<CoreProcess>() {
+        match state.get() {
+            Some(pid) if alive(pid) => {
+                eprintln!("one: 本体已经在跑（pid {pid}），不再重复拉起");
+                return Ok(());
+            }
+            Some(_) => {
+                // 记着的那个自己没了（被人手动结束，或者崩了）：清掉记录，重新拉一个。
+                // 这条是用户从「本体不见了」里自己走出来的路。
+                eprintln!("one: 之前那个本体已经不在了，重新拉起");
+                let _ = state.take();
+            }
+            None => {}
+        }
+    }
     // 打包后的 exe 可能在任意目录启动，因此不依赖当前工作目录。
     let runtime = match find_core() {
         Ok(runtime) => runtime,
@@ -260,6 +395,10 @@ pub fn start_core(app: &AppHandle) -> Result<(), String> {
                     }
                 }
             });
+        }
+        // 记下 pid，退出时由壳来结束它（见本文件「本体进程的生死」）。
+        if let Some(state) = app.try_state::<CoreProcess>() {
+            state.set(child.id());
         }
         let _ = child.wait();
     });
@@ -769,6 +908,49 @@ pub fn start_bridge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 真实起一个会待着不走的进程，用来验「结束它」这件事真的结束了。
+    /// 用真进程而不是桩：这里错的正是「以为结束了其实没结束」，桩不会露馅。
+    fn spawn_idle() -> std::process::Child {
+        let mut command = std::process::Command::new("powershell");
+        command
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+            .creation_flags(CREATE_NO_WINDOW);
+        command.spawn().expect("起一个待着的进程")
+    }
+
+    #[test]
+    fn a_pid_that_never_existed_is_not_alive() {
+        // 「探不到」与「还在」必须分得开，否则 stop_core 会去杀一个已经走了的 pid。
+        assert!(!alive(u32::MAX - 1));
+        assert!(!terminate(u32::MAX - 1));
+    }
+
+    #[test]
+    fn terminating_a_process_really_ends_it() {
+        let mut child = spawn_idle();
+        let pid = child.id();
+        assert!(alive(pid), "刚起来就该是活的");
+        assert!(terminate(pid), "有权限就该杀得掉");
+        // 进程真正消失之前，管道还没释放，「重新启动」紧接着起新的就会撞上它。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive(pid) && Instant::now() < deadline {
+            thread::sleep(CORE_STOP_POLL);
+        }
+        assert!(!alive(pid), "杀完就该不在了");
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn the_recorded_pid_is_taken_out_exactly_once() {
+        // stop_core 是幂等的：退出钩子与「重新启动」都会调它，第二次不能再杀一遍。
+        let state = CoreProcess::new();
+        assert_eq!(state.get(), None);
+        state.set(4242);
+        assert_eq!(state.get(), Some(4242));
+        assert_eq!(state.take(), Some(4242));
+        assert_eq!(state.take(), None);
+    }
 
     /// 临时目录建在目标目录旁边（Windows 允许跨卷创建，这里同卷最省事）。
     /// 名字带测试用途与随机尾巴，并发跑时不互相踩。

@@ -142,6 +142,22 @@ erDiagram
 
 **工作区键与插件页面共用**（`summaryCommandContext` 与 `pageCommandContext` 都退回 `personal`）：同一个键，否则同一条日程会在命令行、插件页面、摘要条三处各存一份。
 
+## 已实现：壳发往本体的帧
+
+壳是 Rust，协议的真相源是 `packages/contracts/src/wire.ts`，**两边没有编译期联系**。壳发往本体的帧因此全部收在 `src-tauri/src/frames.rs`，并由两条测试钉住字段集。
+
+这条规矩是被实机逼出来的：壳发 `clients.launch` 时把 `provider` 写成了 `kind`，本体按不可信输入解析 → `parseClientMessage` 返回 `null` → 日志「收到无法解析的帧」→ **并把整根管道踢掉**。用户点「打开 ONE 桌面端」什么都没发生，而菜单里的那一项看着完全正常。帧散落在 `main.rs` 与 `plugin.rs` 各处时就一定会出这种错，两边都没有编译器拦它。
+
+| 帧                | 关键字段                      | 用途                                           |
+| ----------------- | ----------------------------- | ---------------------------------------------- |
+| `hello`           | `client: {role, provider, …}` | 每个窗口一个身份；对话条不申报能力             |
+| `clients.launch`  | `provider`                    | 请本体拉起某个寻址键（客户端之间不 spawn）     |
+| `clients.list`    | —                             | 问「装了什么、谁在跑」；菜单只给点了能开的入口 |
+| `capability.call` | `capability, target, args`    | 跨窗口请另一个客户端做事                       |
+| `page.read`       | `provider, path`              | 取插件页面 HTML                                |
+
+`clients.launch` 的字段名与 `hello.client.provider` **必须是同一个词** —— 寻址键在三处（`hello`、`clients.launch`、命令行）各写一遍，改一处不改另一处就是一次「点了没反应」。
+
 ## 下一步领域命令草案
 
 统一命令信封：`{ requestId, workspaceId, source: 'ui' | 'agent', runId?, expectedVersion?, input }`。修改命令接受 idempotencyKey；命令来源在可信边界标记，不相信客户端自报权限。

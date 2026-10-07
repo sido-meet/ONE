@@ -11,6 +11,7 @@ import { PIPE_PATH, serveOnPipe } from './pipe.ts';
 import { createProviderRegistry } from './providers/registry.ts';
 import type { ProviderDeclaration } from './providers/registry.ts';
 import { readInstalled, writeInstalled } from './installed.ts';
+import { becomeTheCore, providerScriptsOf } from './startup.ts';
 import { dataDir as resolveDataDir } from '../../packages/hostpaths/src/index.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -131,85 +132,104 @@ ports.calendar = registry.calendar;
 ports.notes = registry.notes;
 
 /**
- * 拉起安装清单里的提供方。
+ * 拉起安装清单里的提供方，得到一串脚本名。
  *
- * 按**脚本**去重，不是按寻址键：日历与笔记由同一个进程提供，拉两次就会有两个
- * 进程各报一次身份，名册里凭空多出四个参与者，调用时还会挑中先来的那个。
- * 一个寻址键只能有一个参与者在跑 —— 这是协议的前提（ADR-017）。
+ * 去重按**脚本**而不是寻址键 —— 日历与笔记由同一个进程提供，拉两次就是两个进程各报
+ * 一次身份。规矩本身在 startup.ts 里（那里还有另一半：抢管道之前一个都不许拉）。
  */
-const providerScripts = new Set(
-  installedProviders.map(
-    (item) => LAUNCH_SCRIPTS[item.id] ?? `client:${item.id}`,
-  ),
+const providerScripts = providerScriptsOf(
+  installedProviders.map((item) => item.id),
+  LAUNCH_SCRIPTS,
 );
-for (const script of providerScripts) {
-  // 拉不起来的由提供方自己报错退出：本体不能因为一个插件缺失就不启动。
-  // 但**拉不起来这件事本身必须说得出口** —— spawn 的错误是异步的，上面那个
-  // try/catch 抓不到，只会走到 launchScript 里的 error 监听器，那一句是写给
-  // 终端看的。用户看到的是「装了没运行」，却不知道为什么。
-  process.stderr.write(`ONE 本体：正在拉起 ${script}\n`);
-  try {
-    await launchScript(script);
-  } catch (error) {
-    process.stderr.write(`ONE 本体：拉起 ${script} 失败：${String(error)}\n`);
-  }
-}
 
-let server: net.Server;
-try {
-  server = await serveOnPipe(core);
-} catch (cause) {
-  // 管道被占说明已经有一个本体在跑：这不是故障，别把栈打到用户脸上。
-  const code = (cause as NodeJS.ErrnoException | undefined)?.code;
-  if (code === 'EADDRINUSE') {
-    process.stdout.write('ONE 本体已经在运行，本次启动作废。\n');
-    process.exit(0);
-  }
-  throw cause;
-}
-process.stdout.write(
-  `ONE core ${version} 已启动：命名管道 ${PIPE_PATH}，已安装客户端 ${installed.join('、')}\n`,
-);
+let server: net.Server | null = null;
 
 /**
- * **本体也可以是入口**：起来了就把可视客户端一并带出来。
+ * 「我是不是那个本体」要在**任何副作用之前**定下来。
  *
- * 以前这条路的顺序是反的 —— 要看宠物得先在一个终端里起本体，再在另一个终端里
- * 起客户端。于是「启动 ONE」实际上是「手动开两个进程」，而且必须看得见那个终端。
- * 那个终端一关，本体跟着死，用户面前的宠物就变成一个连不上任何东西的空窗。
- *
- * 由 `ONE_LAUNCH_CLIENT=pet|desktop` 开启：**本体客户端自己不会设这个变量**，
- * 所以不会互相拉起、来回递归。已经在场的同类客户端不重复拉 —— 一个寻址键只能
- * 有一个参与者在跑（ADR-017）。
+ * steps 里那几件事就是副作用：打印启动行、拉起提供方、把可视客户端带出来。第二个本体
+ * 在这里就该收手 —— 它要是接着往下走，用户机器上就会多出一整份没人管的提供方，而名册
+ * 里每个寻址键从此有两个参与者（ADR-017 的前提被悄悄破坏，调用还会挑中先来的那个）。
+ * 详见 startup.ts。
  */
-const launchOneself = process.env['ONE_LAUNCH_CLIENT']?.trim();
-if (launchOneself && isProviderId(launchOneself)) {
-  if (installed.includes(launchOneself)) {
-    if (core.roster().some((entry) => entry.provider === launchOneself))
-      process.stderr.write(
-        `ONE 本体：${launchOneself} 已经在了，不再重复拉起\n`,
+const becameTheCore = await becomeTheCore({
+  claim: async () => {
+    try {
+      server = await serveOnPipe(core);
+      return true;
+    } catch (cause) {
+      // 管道被占说明已经有一个本体在跑：这不是故障，别把栈打到用户脸上。
+      const code = (cause as NodeJS.ErrnoException | undefined)?.code;
+      return code === 'EADDRINUSE' ? false : Promise.reject(cause);
+    }
+  },
+  claimFailed: () => {
+    process.stdout.write('ONE 本体已经在运行，本次启动作废。\n');
+  },
+  steps: [
+    async () => {
+      process.stdout.write(
+        `ONE core ${version} 已启动：命名管道 ${PIPE_PATH}，已安装客户端 ${installed.join('、')}\n`,
       );
-    else {
-      process.stderr.write(`ONE 本体：正在拉起客户端 ${launchOneself}\n`);
+    },
+    // 拉不起来的由提供方自己报错退出：本体不能因为一个插件缺失就不启动。
+    // 但**拉不起来这件事本身必须说得出口** —— spawn 的错误是异步的，try/catch 抓不到，
+    // 只会走到 launchScript 里的 error 监听器，那一句是写给终端看的。用户看到的是
+    // 「装了没运行」，却不知道为什么。
+    ...providerScripts.map((script) => async () => {
+      process.stderr.write(`ONE 本体：正在拉起 ${script}\n`);
       try {
-        await launchClient(launchOneself);
+        await launchScript(script);
       } catch (error) {
         process.stderr.write(
-          `ONE 本体：拉起客户端 ${launchOneself} 失败：${String(error)}\n`,
+          `ONE 本体：拉起 ${script} 失败：${String(error)}\n`,
         );
       }
-    }
-  } else {
-    // 说要拉起的那个没装 —— 说清楚是哪一种没装，别让人以为是自己没点对。
-    process.stderr.write(
-      `ONE 本体：${launchOneself} 没有安装，先 core install ${launchOneself}\n`,
-    );
-  }
-}
+    }),
+    async () => {
+      /**
+       * **本体也可以是入口**：起来了就把可视客户端一并带出来。
+       *
+       * 以前这条路的顺序是反的 —— 要看宠物得先在一个终端里起本体，再在另一个终端里
+       * 起客户端。于是「启动 ONE」实际上是「手动开两个进程」，而且必须看得见那个终端。
+       * 那个终端一关，本体跟着死，用户面前的宠物就变成一个连不上任何东西的空窗。
+       *
+       * 由 `ONE_LAUNCH_CLIENT=pet|desktop` 开启：**本体客户端自己不会设这个变量**，
+       * 所以不会互相拉起、来回递归。已经在场的同类客户端不重复拉 —— 一个寻址键只能
+       * 有一个参与者在跑（ADR-017）。
+       */
+      const myself = process.env['ONE_LAUNCH_CLIENT']?.trim();
+      if (!myself || !isProviderId(myself)) return;
+      if (!installed.includes(myself)) {
+        // 说要拉起的那个没装 —— 说清楚是哪一种没装，别让人以为是自己没点对。
+        process.stderr.write(
+          `ONE 本体：${myself} 没有安装，先 core install ${myself}\n`,
+        );
+        return;
+      }
+      if (core.roster().some((entry) => entry.provider === myself)) {
+        process.stderr.write(`ONE 本体：${myself} 已经在了，不再重复拉起\n`);
+        return;
+      }
+      process.stderr.write(`ONE 本体：正在拉起客户端 ${myself}\n`);
+      try {
+        await launchClient(myself);
+      } catch (error) {
+        process.stderr.write(
+          `ONE 本体：拉起客户端 ${myself} 失败：${String(error)}\n`,
+        );
+      }
+    },
+  ],
+});
+if (!becameTheCore) process.exit(0);
 
+// TS 看不穿 claim 回调里的赋值，它看到的 `server` 仍然是声明时的 null ——
+// 所以这里不假装它是 net.Server，老老实实按可能为空来收尾。抢到管道之后才走到
+// 这一行，server 必然有值；万一不是，close 少调一次也只是句柄没关，进程马上就退。
 const shutdown = () => {
   core.unsubscribe();
-  server.close();
+  server?.close();
   process.exit(0);
 };
 process.on('SIGINT', shutdown);
