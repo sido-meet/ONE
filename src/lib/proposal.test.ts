@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Proposal } from '../../packages/contracts/src/index.ts';
 import {
+  bodyOf,
   offsetLabel,
   outcomeOf,
   pendingCount,
@@ -93,6 +94,23 @@ describe('提议卡片上的时间', () => {
 });
 
 describe('卡片的状态陈述', () => {
+  it('日历与笔记要说不同的话：统一说「已保存」会让用户不知道东西去了哪', () => {
+    const created = {
+      status: 'created',
+      created: { entityId: 'e1', at: '2026-10-07T11:00:00.000Z' },
+    } as const;
+    expect(outcomeOf(proposal(created))).toContain('已写进日历');
+    expect(
+      outcomeOf(
+        proposal({
+          ...created,
+          domain: 'notes',
+          draft: { title: '会议纪要', body: '三点结论' },
+        } as Partial<Proposal>),
+      ),
+    ).toContain('已写进笔记');
+  });
+
   it('三个结果各有一句话，卡片不会变成空白', () => {
     expect(outcomeOf(proposal())).toContain('等你确认');
     expect(
@@ -154,7 +172,7 @@ describe('挑哪一条给用户看', () => {
     ).toBeUndefined();
   });
 
-  it('标题取自草稿，笔记那支等 P05', () => {
+  it('标题取自草稿，笔记也有标题', () => {
     expect(titleOf(proposal())).toBe('面试');
     expect(
       titleOf(
@@ -163,7 +181,34 @@ describe('挑哪一条给用户看', () => {
           draft: { title: '会议纪要', body: '…' },
         } as Partial<Proposal>),
       ),
-    ).toBe('');
+    ).toBe('会议纪要');
+  });
+
+  it('笔记预览按行截，不按字截', () => {
+    // 按字截会把一行腰斩，用户看到的半句话反而更拿不准这条笔记记了什么。
+    const note = proposal({
+      domain: 'notes',
+      draft: {
+        title: '复盘',
+        body: '第一点很长很长很长很长很长很长很长的一行\n第二点\n第三点\n第四点',
+      },
+    } as Partial<Proposal>);
+    const preview = bodyOf(note);
+    expect(preview).toContain('第一点很长');
+    expect(preview).toContain('第三点');
+    expect(preview).not.toContain('第四点');
+    expect(preview.endsWith('…')).toBe(true);
+    // 日历没有正文可言
+    expect(bodyOf(proposal())).toBe('');
+  });
+
+  it('只有一句的笔记不再重复摆一遍正文', () => {
+    // 标题本来就是正文首行，短笔记再摆一遍等于同一句话写两遍。
+    const short = proposal({
+      domain: 'notes',
+      draft: { title: '一句话', body: '一句话' },
+    } as Partial<Proposal>);
+    expect(bodyOf(short)).toBe('');
   });
 
   it('待确认的条数告诉气泡要不要让位给卡片', () => {

@@ -107,21 +107,46 @@ export function pendingOf(proposals: Proposal[]): Proposal | undefined {
 /**
  * 一条提议现在的状态陈述。三个结果都要有话说 —— 卡片从「待确认」变成空白，
  * 用户会以为它从没出现过。
+ *
+ * 「日历」和「笔记」要说不同的话：统一说「已保存」会让用户不知道东西去了哪。
  */
 export function outcomeOf(proposal: Proposal): string {
+  const where = proposal.domain === 'calendar' ? '已写进日历' : '已写进笔记';
+  const when = proposal.created?.at.slice(0, 16).replace('T', ' ');
   if (proposal.status === 'pending') return '还没写进去，等你确认。';
   if (proposal.status === 'created')
-    return proposal.created
-      ? `已写进日历（${proposal.created.at.slice(0, 16).replace('T', ' ')}）。`
-      : '已写进日历。';
+    return proposal.created && when ? `${where}（${when}）。` : `${where}。`;
   return proposal.rejected?.reason
     ? `没写进去：${proposal.rejected.reason}`
     : '没写进去。';
 }
 
-/** 提议的标题。0.1 只有日程，笔记那支等 P05。 */
+/** 提议的标题。两个域都有，日历那个不是唯一有标题的。 */
 export function titleOf(proposal: Proposal): string {
-  return proposal.domain === 'calendar' ? proposal.draft.title : '';
+  return proposal.draft.title;
+}
+
+/**
+ * 笔记正文的预览。**按行截，不按字截** —— 按字截会把一行腰斩，
+ * 用户看到的半句话反而更让人拿不准这条笔记记了什么。
+ *
+ * 卡片只有两三行的位置，所以只给前几行；要看全文用「编辑」。
+ */
+export const NOTE_PREVIEW_LINES = 3;
+
+export function bodyOf(proposal: Proposal): string {
+  if (proposal.domain !== 'notes') return '';
+  const lines = proposal.draft.body
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  // 只剩标题那一句就返回空串：标题本来就是正文首行（note.ts 的 titleOf 从
+  // 正文取），短笔记再摆一遍等于同一句话写两遍，看着像出了两次内容。
+  if (lines.length <= 1) return '';
+  const shown = lines.slice(0, NOTE_PREVIEW_LINES);
+  return lines.length > shown.length
+    ? `${shown.join('\n')}…`
+    : shown.join('\n');
 }
 
 /** 快照里还剩几条没处理 —— 气泡用它决定要不要在云里让位给卡片。 */

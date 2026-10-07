@@ -143,6 +143,17 @@ export async function runCli(argv: string[], pipe?: string) {
             ],
           }));
     process.stdout.write(`${JSON.stringify(reply)}\n`);
+  } else if (first === 'conversation') {
+    // 读回来说过的话。宠物窗口被别的程序盖住、或那个无边框置顶窗口拿不到键盘
+    // 焦点时，「ONE 到底回了我什么」只剩下这一条不靠鼠标的路 —— 没有它，无头
+    // 验收就只能看日志猜。
+    const reply = await ask((id) => ({
+      t: 'call',
+      id,
+      cmd: 'conversationHistory',
+      args: [second ?? 'welcome'],
+    }));
+    process.stdout.write(`${JSON.stringify(reply)}\n`);
   } else if (first === 'launch') {
     const reply = await ask((id) => ({
       t: 'clients.launch',

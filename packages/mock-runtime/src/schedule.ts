@@ -25,8 +25,20 @@ import type { CalendarDraft } from '../../contracts/src/proposal.ts';
 /** 议程长度。0.1 不让用户指定时长，但**必须显示在预览里** —— 他有权知道这事多久。 */
 export const DEFAULT_DURATION_MINUTES = 60;
 
+/**
+ * 失败的两种，**必须分开**。
+ *
+ * `near` 为真表示「这句话明显是在安排一件事，只差某个信息」，Agent 应当把
+ * `reason` 原样讲给用户听。为假表示「这就是一句闲聊」，讲「没听出是几点」只会
+ * 让用户莫名其妙 —— 用户问「今天天气不错」，ONE 回一句「没听出是哪一天」，
+ * 听着像系统在挑刺。
+ *
+ * 判据是**句子里有没有钟点词**。「下午三点安排面试」缺的是哪一天，值得说；
+ * 「今天天气不错」有个「今天」但压根没说时间，不值得说。
+ */
 export type ScheduleAttempt =
-  { ok: true; draft: CalendarDraft } | { ok: false; reason: string };
+  | { ok: true; draft: CalendarDraft }
+  | { ok: false; reason: string; near: boolean };
 
 const DAY_WORDS: Record<string, number> = {
   今天: 0,
@@ -126,48 +138,75 @@ function cnNumber(raw: string): number | null {
   return value;
 }
 
-const reject = (reason: string): ScheduleAttempt => ({ ok: false, reason });
+const reject = (reason: string, near = false): ScheduleAttempt => ({
+  ok: false,
+  reason,
+  near,
+});
+
+/**
+ * 句子里有没有钟点词。这是「像在安排一件事」与「只是闲聊」的分界，也是
+ * `near` 的判据：`3点`、`15:00`、`上午九点` 都算，没说钟点就不算。
+ */
+const CLOCK_HINT = /[点时]|\d\s*[:：]/;
 
 /**
  * 抽草稿。`now` 是基准时刻（测试传固定值，不依赖真实时钟）。
  *
  * 失败时给的是**可以直接说给用户听的一句话**，不是错误码：Agent 要把它讲出来，
  * 所以必须像人话，而且要带上「怎么说它才听得懂」的例子。
+ *
+ * `near` 一路跟着「有没有钟点词」走，原因写在 `CLOCK_HINT` 上面：「今天天气
+ * 不错」里也有「今天」，拿日期词当「像在安排事」的判据等于没有判据。
  */
 export function parseSchedule(text: string, now: Date): ScheduleAttempt {
   const input = text.trim();
   if (!input) return reject('没听清要安排什么。');
 
+  const spokeClock = CLOCK_HINT.test(input);
   const dayMatch = input.match(DAY_PATTERN);
   if (!dayMatch)
-    return reject('没听出是哪一天。试试「明天下午三点安排面试」这种说法。');
+    return reject(
+      '没听出是哪一天。试试「明天下午三点安排面试」这种说法。',
+      spokeClock,
+    );
 
   const timeMatch = input.match(TIME_PATTERN);
   if (!timeMatch)
-    return reject('没听出是几点。试试「明天下午三点安排面试」这种说法。');
+    return reject(
+      '没听出是几点。试试「明天下午三点安排面试」这种说法。',
+      spokeClock,
+    );
 
   const [, periodWord, rawHour = '', rawMinute] = timeMatch;
   const hour = cnNumber(rawHour);
   if (hour === null || hour < 0 || hour > 23)
-    return reject('没听出是几点。试试「明天下午三点安排面试」这种说法。');
+    return reject('没听出是几点。试试「明天下午三点安排面试」这种说法。', true);
   const minute = cnNumber(rawMinute ?? '') ?? 0;
   if (minute < 0 || minute > 59)
-    return reject('没听出是几分。试试「明天下午三点半安排面试」这种说法。');
+    return reject(
+      '没听出是几分。试试「明天下午三点半安排面试」这种说法。',
+      true,
+    );
 
   const shift = PERIOD_WORDS[periodWord ?? ''] ?? 0;
   // 十二点是十二点，不加十二小时。「下午三点」=15:00，「下午十二点」=12:00。
   const hour24 = hour === 12 ? (shift === 0 ? 0 : 12) : hour + shift;
-  if (hour24 > 23) return reject('这个钟点不存在。');
+  if (hour24 > 23) return reject('这个钟点不存在。', true);
 
   const day = dayMatch[0] ?? '';
   const title = titleOf(input, day, timeMatch[0] ?? '');
   if (!title)
     return reject(
       '知道是哪天哪几点，但没听出要安排什么。试试「明天下午三点安排面试」。',
+      true,
     );
   const dayOffset = DAY_WORDS[day as keyof typeof DAY_WORDS];
   if (dayOffset === undefined)
-    return reject('没听出是哪一天。试试「明天下午三点安排面试」这种说法。');
+    return reject(
+      '没听出是哪一天。试试「明天下午三点安排面试」这种说法。',
+      true,
+    );
 
   const start = new Date(now);
   start.setDate(start.getDate() + dayOffset);

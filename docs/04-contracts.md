@@ -108,10 +108,13 @@ erDiagram
 
 `packages/contracts/src/proposal.ts`。协议版本因此升到 **wire v4**。
 
-| 命令              | 入参                              | 出参                 | 边界上的行为                                                                                 |
-| ----------------- | --------------------------------- | -------------------- | -------------------------------------------------------------------------------------------- |
-| `proposalResolve` | `{proposalId, decision, reason?}` | `ProposalResolution` | 不存在为 NOT_FOUND；**已解决过的返回既有结果**且 `applied:false`；`reject` 必须带非空 reason |
-| `listProposals`   | —                                 | 摘要列表             | 读的是同一份状态，命令行与排障用                                                             |
+| 命令                  | 入参                              | 出参                       | 边界上的行为                                                                                 |
+| --------------------- | --------------------------------- | -------------------------- | -------------------------------------------------------------------------------------------- |
+| `proposalResolve`     | `{proposalId, decision, reason?}` | `ProposalResolution`       | 不存在为 NOT_FOUND；**已解决过的返回既有结果**且 `applied:false`；`reject` 必须带非空 reason |
+| `listProposals`       | —                                 | 摘要列表                   | 读的是同一份状态，命令行与排障用                                                             |
+| `conversationHistory` | conversationId                    | `{conversation, messages}` | 不存在为 NOT_FOUND；按时间顺序返回 `{role, content}`，无头验收读回复用                       |
+
+`proposalResolve` **按 `proposal.domain` 分派**：日历走 `parseCalendarCreate` + `calendar` 端口，笔记走 `parseNotesCreate` + `notes` 端口。写成一律走日历的话，一条笔记提议会被静默写成日程 —— 字段对不上，提供方要么报错要么写出一条空标题日程，而用户看到的是「成功」。工作区取自**提议自己**而不是客户端上报的值。
 
 | 类型                 | 作用                                                                               |
 | -------------------- | ---------------------------------------------------------------------------------- |

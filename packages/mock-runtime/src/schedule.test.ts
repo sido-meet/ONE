@@ -124,4 +124,24 @@ describe('中文日程句式', () => {
   it('空输入不会被当成「全天日程」', () => {
     expect(refuse('   ')).toBeTruthy();
   });
+
+  /**
+   * `near` 决定这句话要不要被解释。它现在也是 `ScheduleAttempt` 的一部分，
+   * 所以这条边界要钉在单测里 —— `draftOf` 靠它区分「差一句」与「闲聊」。
+   */
+  it('区分「说了时间只差日期」与「压根是闲聊」', () => {
+    const nearOf = (text: string) => {
+      const result = parseSchedule(text, NOW);
+      if (result.ok) throw new Error(`本该拒绝却认出来了：${text}`);
+      return result.near;
+    };
+    // 说了钟点，缺的是日期 —— 补一句就成了，该讲。
+    expect(nearOf('下午三点安排面试')).toBe(true);
+    expect(nearOf('明天下午三点')).toBe(true);
+    expect(nearOf('今天下午三点七十分面试')).toBe(true);
+    // 「今天天气不错」里也有「今天」，拿日期词当判据等于没有判据。
+    expect(nearOf('今天天气不错')).toBe(false);
+    expect(nearOf('明天面试')).toBe(false);
+    expect(nearOf('你记得今天开会吗')).toBe(false);
+  });
 });

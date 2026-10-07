@@ -216,7 +216,13 @@
               <!-- 提议挂在**自己那条**回复下面（ADR-022）。归属靠 messageId，
                    不靠「最新的那条」—— 那样三张卡会全部堆到最后一句上。 -->
               {#each proposalsOf(event.message.id) as proposal (proposal.id)}
-                <ProposalCard {proposal} />
+                <ProposalCard
+                  {proposal}
+                  onJumpSource={(id) => {
+                    selectedId = id;
+                    page = 'chat';
+                  }}
+                />
               {/each}
             </article>
           {:else if event.type === 'agent.changed'}

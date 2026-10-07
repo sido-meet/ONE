@@ -34,13 +34,19 @@ let session: ReturnType<Core['connect']>;
 let sent: CoreMessage[];
 let seq = 0;
 
-/** 真的日历提供方。它有自己的幂等回执表，重复写入会被它挡下。 */
-const withCalendar = (p: MemoryProviders): DomainPorts => ({
+/** 真的日历与笔记提供方。它们各自有自己的幂等回执表，重复写入会被它们挡下。 */
+const withProviders = (p: MemoryProviders): DomainPorts => ({
   calendar: () => ({
     id: 'local.calendar',
     kind: 'calendar',
     status: 'ready',
     provider: p.calendar,
+  }),
+  notes: () => ({
+    id: 'local.notes',
+    kind: 'notes',
+    status: 'ready',
+    provider: p.notes,
   }),
 });
 
@@ -53,7 +59,7 @@ beforeEach(() => {
   core = createCore(runtime, {
     version: 'test',
     installed: ['pet'],
-    domains: withCalendar(providers),
+    domains: withProviders(providers),
   });
   session = core.connect(
     {
@@ -95,6 +101,35 @@ async function draft(text: string): Promise<Proposal | undefined> {
 const events = () => providers.read().calendarEvents;
 
 describe('提议确认（ADR-022）', () => {
+  it('笔记提议写进笔记，绝不落进日历', async () => {
+    const proposal = await draft('记一下：客户要求下周给报价');
+    expect(proposal?.domain).toBe('notes');
+
+    const answer = await call('proposalResolve', [
+      { proposalId: proposal?.id, decision: 'confirm' },
+    ]);
+    expect(answer).toMatchObject({ status: 'created', applied: true });
+
+    // 写成「一律走日历」的话，这里会多出一条标题为空的日程，而用户看到的是成功。
+    expect(events()).toHaveLength(0);
+    const notes = providers.read().notes;
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatchObject({
+      title: '客户要求下周给报价',
+      sourceConversationId: 'welcome',
+    });
+  });
+
+  it('「把刚才那段记下来」记的是上一条回复，不是这一条', async () => {
+    await draft('今天先聊到这儿');
+    const proposal = await draft('把刚才那段记下来');
+    expect(proposal?.domain).toBe('notes');
+    if (proposal?.domain !== 'notes') throw new Error('应当是笔记提议');
+    // 说的是「刚才那段」：用户看到的上一条回复，不是刚跑完的确认回复。
+    expect(proposal.draft.body).not.toContain('起草了一条笔记');
+    expect(proposal.draft.body.length).toBeGreaterThan(0);
+  });
+
   it('说得出日程时才起草一条待确认的提议', async () => {
     const proposal = await draft('明天下午三点安排面试');
     expect(proposal).toBeDefined();
@@ -230,5 +265,53 @@ describe('提议确认（ADR-022）', () => {
     }
     // 没接上就是没接上：提议还挂着，用户等提供方起来之后还能再点。
     expect(runtime.getSnapshot().proposals.at(-1)?.status).toBe('pending');
+  });
+});
+
+/**
+ * 读回来说过的话。
+ *
+ * 存在的理由很具体：宠物窗口被别的置顶程序盖住时，那个无边框置顶窗口往往还拿不到
+ * 键盘焦点，「ONE 到底回了什么」界面上就看不到。没有这条命令，无头验收只能去猜
+ * 界面上那句是不是新的。
+ */
+describe('命令行读对话（无头验收用）', () => {
+  it('读得到用户的话与 ONE 的回话，按顺序', async () => {
+    await draft('记一下：客户要求下周给报价');
+    const history = (await call('conversationHistory', ['welcome'])) as {
+      conversation: { id: string };
+      messages: { role: string; content: string }[];
+    };
+    expect(history.conversation.id).toBe('welcome');
+    expect(history.messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(history.messages[0]?.content).toBe('记一下：客户要求下周给报价');
+    expect(history.messages[1]?.content).toContain('起草了一条笔记');
+  });
+
+  it('「差一句」的话真的会出现在回话里，而不是被通用回复盖掉', async () => {
+    await draft('记一下');
+    const history = (await call('conversationHistory', ['welcome'])) as {
+      messages: { role: string; content: string }[];
+    };
+    const last = history.messages.at(-1)?.content ?? '';
+    expect(last).toContain('没说要记什么');
+    expect(last).not.toContain('模拟回复');
+  });
+
+  it('读别的对话就是读不到，不返回一份空的历史', async () => {
+    const id = 'x1';
+    core.handleMessage(live(), {
+      t: 'call',
+      id,
+      cmd: 'conversationHistory',
+      args: ['没有这个对话'],
+    } as never);
+    await vi.advanceTimersByTimeAsync(1);
+    const reply = sent.find(
+      (item): item is Extract<CoreMessage, { t: 'result' }> =>
+        item.t === 'result' && item.id === id,
+    );
+    expect(reply?.ok).toBe(false);
+    if (reply?.ok === false) expect(reply.error.code).toBe('NOT_FOUND');
   });
 });

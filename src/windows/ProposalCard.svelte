@@ -4,7 +4,7 @@
     ProposalResolution,
   } from '../../packages/contracts/src/index.ts';
   import { link } from '../lib/client';
-  import { outcomeOf, titleOf, whenOf } from '../lib/proposal';
+  import { bodyOf, outcomeOf, titleOf, whenOf } from '../lib/proposal';
 
   /**
    * 待确认提议的卡片（ADR-022）。
@@ -14,9 +14,19 @@
    *
    * 三个结果都有话说 —— 待确认、已写进去、没写进去。卡片从「待确认」直接变成空白，
    * 用户会以为它从没出现过。
+   *
+   * `onJumpSource` 只在有消息列表的窗口给（主窗口）。窄条里放一个跳不过去的
+   * 按钮比不放更糟：它看起来能用，点了没反应。
    */
-  let { proposal, compact = false }: { proposal: Proposal; compact?: boolean } =
-    $props();
+  let {
+    proposal,
+    compact = false,
+    onJumpSource = undefined,
+  }: {
+    proposal: Proposal;
+    compact?: boolean;
+    onJumpSource?: (conversationId: string) => void;
+  } = $props();
 
   let busy = $state(false);
   let error = $state('');
@@ -25,6 +35,10 @@
   let reason = $state('');
 
   const settled = $derived(proposal.status !== 'pending');
+  /** 日程与笔记的说法不能混：统一说「草稿」会让用户不知道这条要写去哪。 */
+  const kind = $derived(proposal.domain === 'calendar' ? '日程' : '笔记');
+  /** 笔记没有时间可说，摆正文预览。按行截，按字截会把一行腰斩。空串就整块不画。 */
+  const preview = $derived(proposal.domain === 'notes' ? bodyOf(proposal) : '');
 
   async function decide(decision: 'confirm' | 'reject') {
     if (busy) return;
@@ -49,13 +63,32 @@
   }
 </script>
 
-<article class="card" class:compact class:done={settled} aria-label="日程草稿">
+<article
+  class="card"
+  class:compact
+  class:done={settled}
+  aria-label={proposal.domain === 'calendar' ? '日程草稿' : '笔记草稿'}
+>
   <p class="head">
-    <span class="kind">{settled ? '日程' : '日程草稿'}</span>
+    <span class="kind">{settled ? kind : `${kind}草稿`}</span>
     <strong class="title">{titleOf(proposal)}</strong>
   </p>
   {#if proposal.domain === 'calendar'}
     <p class="when">{whenOf(proposal)}</p>
+  {:else if preview}
+    <p class="when body">{preview}</p>
+  {/if}
+  {#if !compact && onJumpSource}
+    <p class="from">
+      来自
+      <button
+        type="button"
+        class="link"
+        onclick={() => onJumpSource?.(proposal.sourceConversationId)}
+      >
+        这段对话
+      </button>
+    </p>
   {/if}
 
   {#if settled}
@@ -95,7 +128,11 @@
         disabled={busy}
         onclick={() => void decide('confirm')}
       >
-        {busy ? '处理中…' : '确认写进日历'}
+        {busy
+          ? '处理中…'
+          : proposal.domain === 'calendar'
+            ? '确认写进日历'
+            : '确认写进笔记'}
       </button>
       <button
         type="button"
@@ -156,6 +193,24 @@
   }
   .compact .when {
     font-size: 11px;
+  }
+  /* 笔记正文保留换行：按行截过的预览腰斩了就失去意义。 */
+  .when.body {
+    white-space: pre-line;
+  }
+  .from {
+    margin: 4px 0 0;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .link {
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--accent);
+    font-size: inherit;
+    text-decoration: underline;
+    cursor: pointer;
   }
   .outcome {
     margin: 6px 0 0;

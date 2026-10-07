@@ -88,6 +88,38 @@ node .one/run-cli.mjs .one\out.json calendar list '{"rangeStart":"...","rangeEnd
 
 对话条在露出卡片时换高（`resize_bubble` 三档：平时 168 / 结果卡 208 / 带按钮 262）。**改的是窗口高度而不是界面的一个类** —— 界面自己加 class 的话，被切掉的是输入框，看起来就像「ONE 不能打字了」；改完必须重新仲裁整组附属窗口（ADR-020）。
 
+## 无头验收 P05 的笔记闭环
+
+除了上面几条，笔记这一路还多一条 `conversation`：以前只能**发**不能**读**，窗口被盖住时「ONE 到底回了什么」只能靠猜 —— 而「差一句就说差哪一句」那两条提示正是被猜没的。
+
+```powershell
+node .one/run-cli.mjs .one\out.json send welcome 今天天气不错
+node .one/run-cli.mjs .one\out.json send welcome 记一下
+node .one/run-cli.mjs .one\out.json send welcome 下午三点安排面试
+node .one/run-cli.mjs .one\out.json send welcome 记一下：客户要求下周给报价，口头说的没有邮件
+
+# 读回来说过的话：闲聊走通用模拟回复，「记一下」与「下午三点安排面试」
+# 各自说清差哪一句 —— 这三条用界面是验证不到的
+node .one/run-cli.mjs .one\out.json conversation welcome
+
+# 确认两次看幂等，再拒一条看「零写入 + 原因可见」
+node .one/run-cli.mjs .one\out.json proposal confirm <id>
+node .one/run-cli.mjs .one\out.json proposal confirm <id>
+node .one/run-cli.mjs .one\out.json proposal reject <id> 随口说说，不用记
+node .one/run-cli.mjs .one\out.json notes list '{"limit":10}'
+
+# 笔记绝不串进日历：日历里应当一条不多
+node .one/run-cli.mjs .one\out.json calendar list '{"rangeStart":"2026-09-01T00:00:00+08:00","rangeEnd":"2026-12-01T00:00:00+08:00","timeZone":"Asia/Shanghai"}'
+```
+
+三条容易踩的：
+
+- **`send` 之间要隔几秒。** 单对话同时只允许一个写入 Run，连着发会拿到 `BUSY` —— 那不是失败，是排队规则。
+- **`calendar list` 的三个字段都是必填**（`rangeStart` / `rangeEnd` / `timeZone`），少一个就是一条 `VALIDATION` 报错。`timeZone` 要填 IANA 名（`Asia/Shanghai`），不是 `+08:00`。
+- **读回来的是** `{"role":"user"|"assistant","content":"…"}` **的数组**，按时间顺序。`notes list` / `calendar list` 的返回包在 `value.items` 里。
+
+**`.one/` 里的验收脚本已被 gitignore。** `run-cli.mjs` 只是把 `core/src/cli.ts` 用管道驱动一遍（PowerShell 自己发命名管道帧很别扭），逻辑都在本体里。
+
 **`dist-runtime/` 里有 80MB 以上的 `node.exe`，已 gitignore，不要提交。** 重新打包前先关掉上一轮起着的宠物与本体：那份 `node.exe` 正被进程锁着，否则打包会失败（脚本会直接告诉你原因，不会甩一坨 EIO 栈）。要验证产物路径，把 `dist-runtime` 放到 exe 旁边即可 —— 壳启动时第一件事就是打一行日志，说明本体实际用的是哪份 node：
 
 ```

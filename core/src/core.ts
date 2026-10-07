@@ -166,25 +166,45 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
     }
 
     // 可用性先于输入校验，与其他领域命令同一顺序（见 resolveProvider）。
-    const provider = resolveProvider(domains.calendar?.(), 'calendar');
     const context: CommandContext = {
       requestId: `proposal-${input.proposalId}`,
       workspaceId: proposal.workspaceId,
       source: 'ui',
     };
-    const event = await provider.create(
-      context,
-      parseCalendarCreate({
-        ...proposal.draft,
-        sourceConversationId: proposal.sourceConversationId,
-        idempotencyKey: proposalIdempotencyKey(proposal.id),
-      }),
-    );
+    const idempotencyKey = proposalIdempotencyKey(proposal.id);
+    const sourceConversationId = proposal.sourceConversationId;
+
+    // **按提议自己的 domain 分派**。写成「一律走日历」的话，一条笔记提议会被
+    // 静默地写成一条日程：字段对不上，provide 方要么报错要么写出一个空标题的
+    // 日程，而用户看到的是「成功」。判别联合在这里必须收拢，不能靠调用方。
+    const entityId =
+      proposal.domain === 'calendar'
+        ? (
+            await resolveProvider(domains.calendar?.(), 'calendar').create(
+              context,
+              parseCalendarCreate({
+                ...proposal.draft,
+                sourceConversationId,
+                idempotencyKey,
+              }),
+            )
+          ).id
+        : (
+            await resolveProvider(domains.notes?.(), 'notes').create(
+              context,
+              parseNotesCreate({
+                ...proposal.draft,
+                sourceConversationId,
+                idempotencyKey,
+              }),
+            )
+          ).id;
+
     const resolution: ProposalResolution = {
       proposalId: input.proposalId,
       applied: true,
       status: 'created',
-      entityId: event.id,
+      entityId,
       at,
     };
     await runtime.settleProposal(input.proposalId, resolution);
@@ -216,9 +236,46 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
         id: item.id,
         domain: item.domain,
         status: item.status,
-        title: item.domain === 'calendar' ? item.draft.title : '',
-        startsAt: item.domain === 'calendar' ? item.draft.startsAt : undefined,
+        // 两个域都有标题：写成只取日历那条，笔记在命令行里就成了一行空白的条目。
+        title: item.draft.title,
+        ...(item.domain === 'calendar'
+          ? { startsAt: item.draft.startsAt }
+          : { body: item.draft.body.slice(0, 120) }),
       })),
+    /**
+     * 读一段对话的往来的话。界面看得到，但这是本体持有的权威状态 —— 没有它，
+     * 宠物窗口被别的东西盖住时（无边框置顶窗口常常还拿不到键盘焦点），
+     * 「ONE 到底回了我什么」就只能靠猜。
+     *
+     * 读的是同一份快照，不是另一处拷贝。
+     */
+    conversationHistory: async (...args) => {
+      const id = args[0] as string;
+      const snapshot = runtime.getSnapshot();
+      const conversation = snapshot.conversations.find(
+        (item) => item.id === id,
+      );
+      if (!conversation) throw new ClientError('NOT_FOUND', '找不到这个对话');
+      return {
+        conversation: {
+          id: conversation.id,
+          title: conversation.title,
+          agentId: conversation.agentId,
+        },
+        messages: snapshot.events
+          .filter((event) => event.conversationId === id)
+          .filter(
+            (
+              event,
+            ): event is Extract<typeof event, { type: 'message.created' }> =>
+              event.type === 'message.created',
+          )
+          .map((event) => ({
+            role: event.message.role,
+            content: event.message.content,
+          })),
+      };
+    },
     calendarList: (...args) =>
       resolveProvider(domains.calendar?.(), 'calendar').list(
         contextOf(args),
