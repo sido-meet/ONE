@@ -100,6 +100,8 @@ export function createMockAgents(tickMs = 28): ReplyAgent[] {
   return agentCatalog.map(({ id, name }) => ({
     id,
     name,
+    // **自己说自己是模拟的**（ADR-031）。界面上那个「模拟」标签读的就是这一行。
+    kind: 'mock' as const,
     async reply({ text, lastReply, signal }) {
       const attempt = draftOf(text, lastReply);
       // 注入排在解析之后：要让「这句话 ONE 收不了」原样成立。

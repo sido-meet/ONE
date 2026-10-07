@@ -17,11 +17,8 @@
   let coreState = $state(link.state());
   let inputElement = $state<HTMLInputElement | null>(null);
 
-  const agents: { id: AgentId; name: string }[] = [
-    { id: 'chat', name: 'Chat Agent' },
-    { id: 'claude-code', name: 'Claude Code' },
-    { id: 'mcode', name: 'MCode' },
-  ];
+  /** Agent 名册由本体下发，界面只照着显示（ADR-031）。理由同桌面端。 */
+  const agents = $derived(snapshot.agents);
   const PREVIEW = 60;
 
   const activeId = $derived(pickActiveConversationId(snapshot));
@@ -32,6 +29,12 @@
   );
   const agentName = (id: AgentId) =>
     agents.find((agent) => agent.id === id)?.name ?? id;
+  /** 「模拟」只在这里出现，而且是**按本体说的**显示。 */
+  const agentLabel = (id: AgentId) => {
+    const found = agents.find((agent) => agent.id === id);
+    if (!found) return id;
+    return found.kind === 'mock' ? `${found.name} · 模拟` : found.name;
+  };
 
   const lastReply = $derived.by((): Message | undefined => {
     for (const event of [...snapshot.events].reverse())
@@ -183,7 +186,7 @@
         >{/if}
       {coreState === 'ready'
         ? activeRun
-          ? `${agentName(activeRun.agentId)} 正在思考`
+          ? `${agentLabel(activeRun.agentId)} 正在回复`
           : 'ONE'
         : coreState === 'rejected'
           ? 'ONE 拒绝了这个客户端'

@@ -16,6 +16,27 @@ import type {
 
 /** ONE-owned identities; external agent sessions are never conversation IDs. */
 export type AgentId = 'chat' | 'claude-code' | 'mcode';
+
+/**
+ * 这个 Agent 是**模拟**还是**真的接了模型**。
+ *
+ * 它存在的唯一理由是一句硬约束：**模拟回复必须明确标识**。
+ *
+ * 0.2 时界面上那三个「· 模拟」是 Svelte 里写死的字符串，而 Agent 列表也是写死的。
+ * 于是接上真模型之后，界面会一边收着真模型的回复一边说「模拟回复中」—— 用户没法
+ * 知道自己刚才那几句话是模型说的还是程序编的，也就无法判断该不该信。
+ *
+ * **所以这个字段由本体下发，界面不许自己写死。** 界面上出现「模拟」两个字的那一刻，
+ * 它读的是本体刚发来的这一份，不是前端的一个常量。
+ */
+export type AgentKind = 'mock' | 'real';
+
+/** 界面上要显示的 Agent 信息。由本体给出，界面只负责照着显示。 */
+export interface AgentInfo {
+  id: AgentId;
+  name: string;
+  kind: AgentKind;
+}
 /**
  * `interrupted` 不是失败，是**没人接的手**（ADR-028）。
  *
@@ -91,6 +112,14 @@ export interface Snapshot {
   drafts: Record<string, string>;
   /** 按创建顺序的待确认与已解决提议，界面据此把卡片挂回对应消息下面。 */
   proposals: Proposal[];
+  /**
+   * 本体现在挂着哪些 Agent，以及**每个是真是假**（ADR-031）。
+   *
+   * 放在快照里而不是另发一条消息：Agent 名册在进程生命周期内不变，而界面每收到一次
+   * 状态就该知道一次 —— 分成两条消息，就得处理「名册到了但状态还没到」那个窗口，
+   * 界面上会先闪一下空白选择框。
+   */
+  agents: AgentInfo[];
 }
 
 /**
@@ -158,6 +187,14 @@ export interface ConversationRuntime {
 export interface ReplyAgent {
   readonly id: AgentId;
   readonly name: string;
+  /**
+   * **自己报自己是真是假**，本体照着转给界面（ADR-031）。
+   *
+   * 放在 Agent 自己身上而不是装配点的一行配置，是因为「这个实现到底接没接真模型」
+   * 只有它自己知道。装配点写 `kind: 'real'` 的话，换回模拟实现时没人会记得改这一行 ——
+   * 而漏改的后果正是「界面上写着模拟，其实是真模型在答」。
+   */
+  readonly kind: AgentKind;
   reply(input: {
     text: string;
     /** 上一条 assistant 回复。笔记的「把刚才那段记下来」要靠它。 */

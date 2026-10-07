@@ -980,7 +980,7 @@ mod tests {
             provider: "pet".into(),
             label: "ONE 宠物".into(),
             capabilities: Vec::new(),
-            wire_version: 4,
+            wire_version: crate::WIRE_VERSION,
             core_version: Mutex::new(None),
         core_problem: Mutex::new(None),
             writer: Mutex::new(None),

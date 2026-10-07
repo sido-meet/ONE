@@ -55,7 +55,14 @@ export interface Roster {
   connected: RosterEntry[];
 }
 
-/** 界面在第一次收到本体状态之前看到的东西：一个空快照，不是假数据。 */
+/**
+ * 界面在第一次收到本体状态之前看到的东西：一个空快照，不是假数据。
+ *
+ * **`agents` 是空数组，不是默认那三个模拟 Agent。** 填上默认值的话，在本体第一帧
+ * 到达之前，界面会先把「Chat Agent · 模拟」画出来 —— 而那恰恰是我们要消灭的那句谎：
+ * 它会在真模型的机器上闪一下，然后被本体纠正。宁可空着（选择框是空的），也不要先说
+ * 一句可能不对的话。
+ */
 export const EMPTY_SNAPSHOT: Snapshot = {
   workspaces: [],
   conversations: [],
@@ -63,6 +70,7 @@ export const EMPTY_SNAPSHOT: Snapshot = {
   runs: [],
   drafts: {},
   proposals: [],
+  agents: [],
 };
 
 /** 本体多久不回就算它没在。慢于这个数的调用会得到 TIMEOUT 而不是永久挂起。 */

@@ -48,11 +48,25 @@
     return (messageId: string) => grouped.get(messageId) ?? [];
   });
 
-  const agents: { id: AgentId; name: string }[] = [
-    { id: 'chat', name: 'Chat Agent' },
-    { id: 'claude-code', name: 'Claude Code' },
-    { id: 'mcode', name: 'MCode' },
-  ];
+  /**
+   * Agent 名册**由本体下发**（ADR-031），界面只负责照着显示。
+   *
+   * 以前这里是 Svelte 里写死的三个模拟 Agent，而「模拟」两个字也是写死的。接上真模型
+   * 之后，界面会一边收着真模型的回复一边说「模拟回复中」—— 用户没法判断刚才那几句话
+   * 是不是模型说的，也就没法决定该不该信。现在这两样都读本体刚发来的快照。
+   */
+  const agents = $derived(snapshot.agents);
+  /** 「模拟」只在这里出现一次，而且是**按本体说的**显示，不是前端认定。 */
+  const agentLabel = (id: AgentId) => {
+    const found = agents.find((agent) => agent.id === id);
+    if (!found) return id;
+    return found.kind === 'mock' ? `${found.name} · 模拟` : found.name;
+  };
+  /** 正在回复时那行字。**别在模板里拼「模拟」两个字** —— 拼错了没人发现。 */
+  const runningLabel = (id: AgentId) =>
+    agents.find((agent) => agent.id === id)?.kind === 'mock'
+      ? `${agentName(id)} · 模拟回复中`
+      : `${agentName(id)} · 正在回复…`;
   const conversation = $derived(
     snapshot.conversations.find((item) => item.id === selectedId),
   );
@@ -313,8 +327,13 @@
               )}
           >
             {#each agents as agent}<option value={agent.id}
-                >{agent.name} · 模拟</option
+                >{agentLabel(agent.id)}</option
               >{/each}
+            <!-- 本体还没发来名册时**不填默认值**：先闪一下「Chat Agent · 模拟」，
+                 恰恰是我们要消灭的那句谎。空着比先说错一句好。 -->
+            {#if agents.length === 0}<option value=""
+                >正在读取 Agent 名册…</option
+              >{/if}
           </select>
         </label>
       </section>
@@ -355,7 +374,7 @@
               <div class="message-label">
                 {event.message.role === 'user'
                   ? '你'
-                  : `${agentName(event.message.agentId ?? 'chat')} · 模拟`}
+                  : agentLabel(event.message.agentId ?? 'chat')}
               </div>
               <p>{event.message.content}</p>
               <!-- 提议挂在**自己那条**回复下面（ADR-022）。归属靠 messageId，
@@ -384,9 +403,7 @@
         {/each}
         {#if activeRun}
           <article class="message">
-            <div class="message-label">
-              {agentName(activeRun.agentId)} · 模拟回复中
-            </div>
+            <div class="message-label">{runningLabel(activeRun.agentId)}</div>
             <p>
               {snapshot.drafts[activeRun.id] || '正在准备回复…'}<span
                 class="cursor">▍</span
@@ -460,7 +477,15 @@
           </div>
         </form>
         <p class="footnote">
-          这个窗口是本体的一个呈现形式，对话不在这里。回复仍是本地模拟。
+          这个窗口是本体的一个呈现形式，对话不在这里。
+          <!-- 「回复仍是本地模拟」这句以前写死在这儿。它在接上真模型之后就成了一句
+               谎 —— 界面上没有任何一处能提示用户这句话已经不对。现在这句话按本体
+               说的来：只有当前对话的 Agent 确实是模拟的，才敢说「模拟」。 -->
+          {#if agents.find((agent) => agent.id === (conversation?.agentId ?? 'chat'))?.kind === 'mock'}
+            当前对话的回复是本地模拟。
+          {:else}
+            当前对话连的是真实模型。
+          {/if}
         </p>
       </div>
     {:else}

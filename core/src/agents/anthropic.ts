@@ -115,6 +115,8 @@ export function createAnthropicAgent(config: AnthropicConfig): AnthropicAgent {
     // 复用 `chat` 这个寻址键：对话里「谁在说话」是 ONE 的事，不因为换了实现就换名字。
     id: 'chat',
     name: `Claude（${config.model}）`,
+    // 界面上那个「模拟」标签会因此消失 —— 它读的是这一行，不是前端常量（ADR-031）。
+    kind: 'real' as const,
     lastUsage: () => ({ ...usage }),
     async reply({ text: prompt, history, signal }) {
       usage = {};

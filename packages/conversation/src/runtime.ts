@@ -287,6 +287,10 @@ export function createConversationRuntime(
         runs: indexRuns(state.events),
         drafts: { ...drafts },
         proposals: indexProposals(state.events),
+        // **Agent 名册与「是真是假」由本体下发**（ADR-031）。界面不许自己写死 ——
+        // 0.2 那些「· 模拟」是 Svelte 里的字符串，接上真模型之后它会一边收真回复一边
+        // 说「模拟回复中」，用户没法判断刚才那几句话该不该信。
+        agents: agents.map(({ id, name, kind }) => ({ id, name, kind })),
       });
     },
     subscribe(listener) {

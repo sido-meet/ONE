@@ -199,6 +199,7 @@ describe('本体重启后正在跑的回复', () => {
   const agent: ReplyAgent = {
     id: 'chat',
     name: 'Chat Agent',
+    kind: 'mock',
     async reply({ signal }) {
       return { content: forever(signal) };
     },
@@ -304,6 +305,7 @@ describe('停止回复要停掉传输', () => {
       const counting: ReplyAgent = {
         id: 'chat',
         name: 'Chat Agent',
+        kind: 'mock',
         async reply({ signal }) {
           return { content: counted(signal) };
         },
@@ -345,6 +347,7 @@ describe('停止回复要停掉传输', () => {
       const counting: ReplyAgent = {
         id: 'chat',
         name: 'Chat Agent',
+        kind: 'mock',
         async reply({ signal }) {
           return { content: counted(signal) };
         },
@@ -372,5 +375,61 @@ describe('停止回复要停掉传输', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/**
+ * **「模拟」这两个字必须是本体说的，不能是前端认定**（ADR-031）。
+ *
+ * 0.2 时界面把「· 模拟」写死在 Svelte 里，Agent 名册也是写死的三个。于是接上真模型
+ * 之后，界面会一边收着真模型的回复一边说「模拟回复中」—— 用户没法判断刚才那几句话
+ * 是不是模型说的，也就没法决定该不该信，而界面上**没有任何一处**能看出这句话不对。
+ *
+ * 判据是「本体下发什么，界面就显示什么」：装一个自称 `real` 的 Agent，快照里就必须是
+ * `real`。本体要是把 kind 一律写成 `mock`（或者干脆不发这个字段），这条立刻红。
+ */
+describe('Agent 名册要照实下发', () => {
+  const silent = (kind: 'mock' | 'real', name: string): ReplyAgent => ({
+    id: 'chat',
+    name,
+    kind,
+    async reply() {
+      return { content: (async function* () {})() };
+    },
+  });
+
+  it('真模型在快照里就是 real', () => {
+    const store = createMemoryStore({ conversations: [WELCOME] });
+    const runtime = createConversationRuntime(store, [
+      silent('real', 'Claude（claude-sonnet-4-5）'),
+    ]);
+    expect(runtime.getSnapshot().agents).toEqual([
+      { id: 'chat', name: 'Claude（claude-sonnet-4-5）', kind: 'real' },
+    ]);
+    runtime.dispose();
+  });
+
+  it('模拟的在快照里就是 mock', () => {
+    const store = createMemoryStore({ conversations: [WELCOME] });
+    const runtime = createConversationRuntime(store, [
+      silent('mock', 'Chat Agent'),
+    ]);
+    expect(runtime.getSnapshot().agents).toEqual([
+      { id: 'chat', name: 'Chat Agent', kind: 'mock' },
+    ]);
+    runtime.dispose();
+  });
+
+  it('名册里只认挂在本体上的那些 Agent', () => {
+    const store = createMemoryStore({ conversations: [WELCOME] });
+    const runtime = createConversationRuntime(store, [
+      silent('real', '真的'),
+      silent('mock', '模拟的'),
+    ]);
+    expect(runtime.getSnapshot().agents.map((item) => item.name)).toEqual([
+      '真的',
+      '模拟的',
+    ]);
+    runtime.dispose();
   });
 });

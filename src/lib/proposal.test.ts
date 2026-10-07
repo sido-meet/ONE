@@ -223,6 +223,7 @@ describe('挑哪一条给用户看', () => {
           proposal({ id: 'a' }),
           proposal({ id: 'b', status: 'rejected' }),
         ],
+        agents: [],
       }),
     ).toBe(1);
   });

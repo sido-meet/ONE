@@ -80,7 +80,7 @@ fn menu_action(id: &str) -> Option<MenuAction> {
 /// If the host window cannot answer, quitting must not hang the app.
 const QUIT_GRACE: Duration = Duration::from_millis(3000);
 /// Kept in sync with packages/contracts/src/wire.ts.
-const WIRE_VERSION: u32 = 4;
+const WIRE_VERSION: u32 = 5;
 
 /// 能力名只说做什么，不带实现前缀（ADR-017）。以前是 pet.bubble.open，换实现
 /// 就得改调用方；现在由寻址键决定谁提供，壳和界面共用同一份字符串，
