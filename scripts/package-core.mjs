@@ -12,7 +12,15 @@
 // 即可，脚本的其余部分不用动。
 
 import { createHash } from 'node:crypto';
-import { cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -111,3 +119,38 @@ writeFileSync(
 process.stdout.write(
   `core runtime packaged: node ${manifest.node}, entry ${manifest.entry}\n`,
 );
+
+/**
+ * 顺手装到 exe 旁边。**这一步以前是一条人记的命令，而它记错了。**
+ *
+ * 原来是 `Copy-Item dist-runtime src-tauri\target\release\dist-runtime -Recurse -Force`。
+ * 目标目录已存在时，PowerShell 的行为是**把源套进去**（变成
+ * `dist-runtime\dist-runtime\…`），而不是合并 —— 于是真正给 exe 用的那份一直停在
+ * 旧版本，而 `Test-Path` 说它存在，exe 照跑不误。
+ *
+ * **这个错法比跑不起来糟得多**：程序正常启动、界面正常显示，只是跑的是旧代码。
+ * 实机验收会「验证」一份根本不是刚才改的那份产物，而且看不出任何异常。
+ * （真要找出来：改完本体后壳的日志里没有新加的那行，而手跑仓库源码有。）
+ *
+ * 所以这一步收进脚本：少一条命令就少一个能记错的地方。
+ */
+const installDir = process.argv[2]
+  ? path.resolve(repoRoot, process.argv[2])
+  : null;
+if (installDir) {
+  // 整目录换掉而不是覆盖合并：覆盖合并会把**已删掉**的文件留在产物里，而那正是
+  // 「源码里没有、产物里还在」这类幽灵的来处。
+  const parked = `${installDir}.old`;
+  try {
+    renameSync(installDir, parked);
+  } catch {
+    // 上一轮起着的 ONE 正锁着里面的 node.exe。parked 动不了就退而覆盖合并，
+    // 并把这件事说出来 —— 静默降级等于把上面那个坑原样留下。
+    process.stderr.write(
+      `装到 ${installDir} 失败（多半是 ONE 还在跑），改为就地覆盖。\n`,
+    );
+  }
+  cpSync(outDir, installDir, { recursive: true, force: true });
+  if (existsSync(parked)) rmSync(parked, { recursive: true, force: true });
+  process.stdout.write(`core runtime installed to ${installDir}\n`);
+}

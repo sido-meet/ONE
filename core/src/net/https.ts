@@ -35,7 +35,7 @@ export interface HttpsRequestSpec {
   body: string;
   /** 有就走 CONNECT 隧道，没有就直连。 */
   proxy?: ProxyTarget | undefined;
-  /** 建连 + TLS 握手 + 收到响应头的上限。默认 20 秒。 */
+  /** 建连 + TLS 握手 + **收到响应头**的上限。默认 20 秒。 */
   connectTimeoutMs?: number;
   signal?: AbortSignal | undefined;
 }
@@ -248,6 +248,62 @@ function parseHead(raw: string): {
 }
 
 /**
+ * 读够响应头为止，返回状态码、头，以及**头之后剩下的字节**。
+ *
+ * **这一步必须自己计超时。** 建隧道和 TLS 握手都有上限，但「连上了、握过手了，然后
+ * 对面一句话不说」是另一回事 —— 代理挂起、节点半死、TLS 之后被中间设备丢掉，都是
+ * 这个样子。没有上限的话这次 Run 会**永远转圈**：界面上光标在闪、没有错误、没有
+ * 「停止」以外的出路，而背后那条连接一直占着。
+ *
+ * 这一条是实机逼出来的：连发四次请求，有一次整整 **60 秒**什么都没等到。
+ *
+ * 加上限之后它是一次普通的超时错误：界面说得出「等了多久没等到」，用户能重试。代价
+ * 是极慢的首字节会被误判 —— 20 秒还拿不到响应头的请求，本来也已经不太正常。
+ *
+ * 抽成模块级函数而不是留在 `openHttpsStream` 里，是为了能单测：造一个「永远不说话」
+ * 的字节流就行，不必真的架一个握手成功的 TLS 服务器（那需要自签证书，代价与收益
+ * 不成比例）。原来那条测试用假代理测，结果触发的是**握手**超时而不是这一段 ——
+ * 测试绿着，守的却不是它想守的东西。
+ */
+export async function readResponseHead(
+  chunks: AsyncIterable<Uint8Array>,
+  timeoutMs: number,
+): Promise<{
+  status: number;
+  headers: Record<string, string>;
+  /** 头之后多出来的那点字节已经属于响应体了。 */
+  rest: () => AsyncIterable<Uint8Array>;
+}> {
+  const decoder = new TextDecoder('latin1');
+  const iterator = chunks[Symbol.asyncIterator]();
+  let text = '';
+  const deadline = new Promise<never>((_, reject) => {
+    const timer = setTimeout(
+      () => reject(netFailure('等响应头', { code: 'ETIMEDOUT' })),
+      timeoutMs,
+    );
+    timer.unref?.();
+  });
+  for (;;) {
+    const step = await Promise.race([iterator.next(), deadline]);
+    const at = text.indexOf('\r\n\r\n');
+    if (at >= 0) {
+      const tail = Buffer.from(text.slice(at + 4), 'latin1');
+      return {
+        ...parseHead(text.slice(0, at)),
+        rest: async function* rest() {
+          if (tail.length > 0) yield tail;
+          yield* chunks;
+        },
+      };
+    }
+    if (step.done) break;
+    text += decoder.decode(step.value, { stream: true });
+  }
+  throw new ClientError('UNAVAILABLE', '响应头没等到就断了');
+}
+
+/**
  * 发一个 HTTPS 请求，拿到**流式**响应体。
  *
  * 只在**收到响应头**时 resolve。状态码多少都 resolve —— 401、429、529 全是要分类的
@@ -343,34 +399,7 @@ export async function openHttpsStream(
     }
   }
 
-  const buffered = body();
-  const iterator = buffered[Symbol.asyncIterator]();
-  /** 读够响应头为止，返回状态码与头。 */
-  const readHead = async () => {
-    const decoder = new TextDecoder('latin1');
-    let text = '';
-    for (;;) {
-      const step = await iterator.next();
-      const at = text.indexOf('\r\n\r\n');
-      if (at >= 0) {
-        const tail = Buffer.from(text.slice(at + 4), 'latin1');
-        const parsed = parseHead(text.slice(0, at));
-        return {
-          ...parsed,
-          /** 头之后多出来的那点字节已经属于响应体了，别扔。 */
-          rest: async function* rest() {
-            if (tail.length > 0) yield tail;
-            yield* buffered;
-          },
-        };
-      }
-      if (step.done) break;
-      text += decoder.decode(step.value, { stream: true });
-    }
-    throw new ClientError('UNAVAILABLE', '响应头没等到就断了');
-  };
-
-  const { status, headers, rest } = await readHead();
+  const { status, headers, rest } = await readResponseHead(body(), timeoutMs);
   const chunks = rest();
   const chunked = headers['transfer-encoding']
     ?.toLowerCase()

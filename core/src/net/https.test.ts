@@ -1,7 +1,7 @@
 import http from 'node:http';
 import type net from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
-import { decodeChunked, openHttpsStream } from './https.ts';
+import { decodeChunked, openHttpsStream, readResponseHead } from './https.ts';
 
 /** 把字符串变成「按给定长度切开的字节段」，模拟 TCP 分段。 */
 async function* segmented(text: string, size: number) {
@@ -135,5 +135,30 @@ describe('走代理的连接', () => {
     });
     controller.abort();
     await expect(pending).rejects.toThrow();
+  });
+
+  /**
+   * **「连上了但对面一句话不说」必须有上限。**
+   *
+   * 这一条是实机逼出来的：连发四次请求，有一次整整 **60 秒**什么都没等到 —— 界面那头
+   * 表现为光标一直闪、没有错误、没有可点的出路，而连接一直占着。建隧道和 TLS 握手
+   * 都有超时，唯独「都建好了、就是等不到响应头」这一段漏了。
+   *
+   * 没有这条测试它会一直在：代码看着是全的，测试也全过，只有真发请求才撞上 ——
+   * 而撞上的形态恰恰是最难查的那种（界面上什么都没有）。
+   *
+   * 直接喂一个**永远不说话**的字节流，而不是架一个假代理：架假代理的话 TLS 握不完手，
+   * 触发的是**握手**超时，这条测试照样绿着 —— 守的却不是它想守的那一段
+   * （真这么写过一版，绿了才发现）。
+   */
+  it('对面不吭声时按超时收场，不无限等', async () => {
+    async function* mute() {
+      await new Promise(() => {
+        /* 永远不 resolve，也永远不给字节 */
+      });
+    }
+    await expect(readResponseHead(mute(), 300)).rejects.toMatchObject({
+      code: 'TIMEOUT',
+    });
   });
 });

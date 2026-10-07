@@ -85,6 +85,7 @@ node core\src\index.ts install local.calendar local.notes   # 或 pnpm core:cli 
 pnpm core            # 只启动 ONE 本体
 pnpm core:cli list   # 用命令行客户端看本体持有的状态与名册
 pnpm core:package    # 打出本体的可分发产物到 dist-runtime/（node.exe + core + provider-local + 清单）
+pnpm core:package src-tauri/target/release/dist-runtime   # 同上，并**直接装到 exe 旁边**（不要用 Copy-Item，见下）
 pnpm pet:dev         # 宠物客户端（tauri dev）
 pnpm desktop:dev     # 桌面端客户端（tauri dev）
 pnpm desktop:build   # 原生可执行程序（release），会重新嵌入前端资源
@@ -174,10 +175,20 @@ node .one/run-cli.mjs .one\out.json notes update '{"id":"<id>","expectedVersion"
 
 **多屏上截图与移窗各有各的坑。** `screen.ps1` 抓屏幕时边界要按**虚拟屏幕**算：它原来硬编码主屏的 2560×1440，于是请求副屏上的一块矩形时被夹回主屏（2860 → 2140），拍出来是主屏上完全不相干的终端窗口 ——「拍到了别的东西」和「拍错了地方」长得一模一样，差点据此以为副屏布局坏了；现在按 `SystemInformation.VirtualScreen` 算并支持负坐标（副屏在左时 X 为负）。`move-win.ps1` 挪窗口时**必须带 `SWP_NOSIZE`**：少了它，`cx=cy=0` 会把窗口真的缩成 0×0，而截图只回一句 `0x0`，很容易误读成「没抓到窗口」。
 
-**`dist-runtime/` 里有 80MB 以上的 `node.exe`，已 gitignore，不要提交。** 重新打包前先关掉上一轮起着的宠物与本体：那份 `node.exe` 正被进程锁着，否则打包会失败（脚本会直接告诉你原因，不会甩一坨 EIO 栈）。要验证产物路径，把 `dist-runtime` 放到 exe 旁边即可 —— 壳启动时第一件事就是打一行日志，说明本体实际用的是哪份 node：
+**`dist-runtime/` 里有 80MB 以上的 `node.exe`，已 gitignore，不要提交。** 重新打包前先关掉上一轮起着的宠物与本体：那份 `node.exe` 正被进程锁着，否则打包会失败（脚本会直接告诉你原因，不会甩一坨 EIO 栈）。
+
+**把产物放到 exe 旁边要用 `pnpm core:package src-tauri/target/release/dist-runtime`，不要用 `Copy-Item`。** 曾经用的就是 `Copy-Item dist-runtime src-tauri\target\release\dist-runtime -Recurse -Force` —— 目标目录已存在时 PowerShell **不合并，而是把源套进去**（生成 `dist-runtime\dist-runtime\…`），真正给 exe 用的那份一直停在旧版本。这个错法比跑不起来糟得多：程序正常启动、界面正常显示，只是跑的是旧代码，而实机验收会「验证」一份根本不是刚才改的那份产物，**看不出任何异常**。真要找出来只能靠「改完本体后壳的日志里没有新加的那行，但手跑仓库源码有」。现在这一步收进打包脚本，整目录换掉而不是覆盖合并（后者会把**已删掉**的文件留在产物里）。
+
+要验证产物路径，壳启动时第一件事就是打一行日志，说明本体实际用的是哪份 node：
 
 ```
 one: 本体运行时：…\dist-runtime\core/src/index.ts（…\dist-runtime\node.exe），工作目录 …\dist-runtime
+```
+
+**本体接了真模型之后，壳还会多打一行代理**（ADR-031）—— 它是从 Windows 注册表读的，因为 Node 22 的 `fetch` 既不读系统代理也没有 `NODE_USE_ENV_PROXY`。所以这行日志同时是「代理地址读对没有」的证据：
+
+```
+one: 系统代理 127.0.0.1:7897，本体将经它连外网
 ```
 
 ## 调试插件页面
