@@ -20,6 +20,7 @@ import {
   parseCalendarUpdate,
   parseNotesCreate,
   parseNotesDelete,
+  parseNotesGet,
   parseNotesList,
   parseNotesUpdate,
   parseProposalResolve,
@@ -383,6 +384,11 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
         contextOf(args),
         parseNotesList(args[1]),
       ),
+    notesGet: (...args) =>
+      resolveProvider(domains.notes?.(), 'notes').get(
+        contextOf(args),
+        parseNotesGet(args[1]),
+      ),
     notesCreate: (...args) =>
       resolveProvider(domains.notes?.(), 'notes').create(
         contextOf(args),
@@ -673,10 +679,14 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
     }
     // 对方报了码就照传。丢掉码的话，提供方的「没这个文件」到壳那里会变成
     // 「内部错误」，界面上就只能给一句没法排查的话（ADR-016）。
+    //
+    // `details` 一起带走：冲突时对方现在到第几版全靠它。丢了它，界面上那句
+    // 「被改过了」就没有版本号，用户无从判断自己那份还值不值得留。
     waiting.reject(
       new ClientError(
         message.code ?? 'INTERNAL',
         message.message || '目标客户端处理失败',
+        message.details,
       ),
     );
   };

@@ -265,6 +265,62 @@ describe('宿主这一侧的桥', () => {
     bridge.dispose();
   });
 
+  /**
+   * 失败要带着**错误码**，冲突还要带着**服务器当前版本**。
+   *
+   * 少了码，页面只拿到一句人话，于是「这条被别人改过了」与「日历源没连上」长得
+   * 一模一样 —— 而这两件事要给的界面完全不同：前者得把用户打的字留在框里，
+   * 后者只提示重试。
+   *
+   * 少了版本号，「被别人改过了」这句话本身也不够：用户得知道对方改成了什么，
+   * 才决定是放弃自己那份还是再看一眼。
+   */
+  it('失败回执带着错误码，冲突还带着服务器当前版本', async () => {
+    const cases = [
+      {
+        thrown: new ClientError('PERMISSION_DENIED', '缺授权', {
+          providerProblem: 'not-authorized',
+        }),
+        expect: { code: 'PERMISSION_DENIED' },
+        without: ['currentVersion'],
+      },
+      {
+        thrown: new ClientError('CONFLICT', '这条已被其他操作更新', {
+          expectedVersion: 1,
+          currentVersion: 2,
+        }),
+        expect: { code: 'CONFLICT', currentVersion: 2 },
+        without: [] as string[],
+      },
+    ];
+
+    for (const item of cases) {
+      const { host, send } = fakeHost();
+      const { frame, contentWindow, posted } = fakeFrame();
+      const bridge = attachPluginPage({
+        link: fakeLink(() => Promise.reject(item.thrown)),
+        provider: 'local.notes',
+        frame,
+        host,
+      });
+      send(
+        {
+          protocol: PAGE_PROTOCOL,
+          id: 'pc',
+          capability: 'notes.update',
+          args: {},
+        },
+        contentWindow,
+      );
+      await tick();
+
+      const data = posted[0]?.data as Record<string, unknown>;
+      expect(data).toMatchObject(item.expect);
+      for (const key of item.without) expect(data).not.toHaveProperty(key);
+      bridge.dispose();
+    }
+  });
+
   it('退订之后不再应答', async () => {
     let called = 0;
     const link = fakeLink(() => {

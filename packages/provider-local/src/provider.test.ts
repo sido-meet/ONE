@@ -136,4 +136,51 @@ describe('本地文件提供方', () => {
     // 静默当成空库的话，用户会以为日程全没了，而不是文件坏了。
     expect(() => createLocalProvider(file, 'calendar')).toThrow(/损坏/);
   });
+
+  /**
+   * 编辑的前提是读得到正文。
+   *
+   * 列表只给摘要（`NoteSummary` 里没有 `body`），所以「编辑」按钮第一件事必须是
+   * `notes.get`—— 改不了读不到的东西。
+   */
+  it('列表只给摘要，取单条才拿得到正文', async () => {
+    const provider = createLocalProvider(scratch(), 'notes');
+    const created = (await provider.create(context, {
+      title: '客户要求下周给报价',
+      body: '口头说的，没有邮件。',
+      idempotencyKey: 'n1',
+    })) as { id: string };
+
+    const page = (await provider.list(context, { limit: 20 })) as {
+      items: Record<string, unknown>[];
+    };
+    // 正文不进列表：列表是给几十条摘要扫的，不是给全文搬的。
+    expect(page.items[0]).not.toHaveProperty('body');
+
+    const full = (await provider.get?.(context, { id: created.id })) as {
+      body: string;
+      version: number;
+    };
+    expect(full.body).toBe('口头说的，没有邮件。');
+    expect(full.version).toBe(1);
+  });
+
+  it('取不存在的笔记说「找不到」，不返回一条空的', async () => {
+    const provider = createLocalProvider(scratch(), 'notes');
+    await expect(
+      provider.get?.(context, { id: '根本没有这条' }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('取笔记要过工作区边界', async () => {
+    const provider = createLocalProvider(scratch(), 'notes');
+    const created = (await provider.create(context, {
+      title: '个人',
+      body: '',
+      idempotencyKey: 'w1',
+    })) as { id: string };
+    await expect(
+      provider.get?.({ ...context, workspaceId: '别人的' }, { id: created.id }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
 });

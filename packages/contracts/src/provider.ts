@@ -13,6 +13,7 @@ import type {
   NotePage,
   NotesCreateInput,
   NotesDeleteInput,
+  NotesGetInput,
   NotesUpdateInput,
 } from './domain.ts';
 
@@ -41,14 +42,37 @@ export const CALENDAR_CAPABILITIES = [
 ] as const;
 export const NOTES_CAPABILITIES = [
   'notes.list',
+  // 编辑的前提：列表只给摘要，正文得单独取。
+  'notes.get',
   'notes.create',
   'notes.update',
   'notes.remove',
 ] as const;
 
-/** 端口方法名，也就是能力名后缀。两者必须一一对应。 */
-export const DOMAIN_ACTIONS = ['list', 'create', 'update', 'remove'] as const;
-export type DomainAction = (typeof DOMAIN_ACTIONS)[number];
+/**
+ * 端口方法名，也就是能力名后缀。**两个域各有一份，不是共用一份。**
+ *
+ * 共用会让「给笔记加一条」同时变成「要求日历也有那一条」—— 注册表按这份名单
+ * 核对能力申报，缺一个就把整个提供方判成「没授权」（宁可报没授权，也不能把一个
+ * 残缺的提供方当成完整的用）。日历确实不需要 `get`：它的列表返回的就是完整实体；
+ * 笔记的列表剥掉了正文，不给 `get` 就没法编辑。
+ */
+export const CALENDAR_ACTIONS = ['list', 'create', 'update', 'remove'] as const;
+export const NOTES_ACTIONS = [
+  'list',
+  'get',
+  'create',
+  'update',
+  'remove',
+] as const;
+export type DomainAction =
+  (typeof CALENDAR_ACTIONS)[number] | (typeof NOTES_ACTIONS)[number];
+
+/** 这个域要哪几个动作。注册表与命令行都问它，别各写一份。 */
+export const ACTIONS_OF: Record<DomainKind, readonly string[]> = {
+  calendar: CALENDAR_ACTIONS,
+  notes: NOTES_ACTIONS,
+};
 
 /** 中文标签集中在这里，文案不散落到各个调用点。 */
 export const DOMAIN_LABELS: Record<DomainKind, string> = {
@@ -80,6 +104,8 @@ export interface NotesProvider {
     context: CommandContext,
     input: NormalizedNotesListInput,
   ): Promise<NotePage>;
+  /** 取全文。编辑之前必须先读 —— 列表只给摘要，正文不在里面。 */
+  get(context: CommandContext, input: NotesGetInput): Promise<Note>;
   create(context: CommandContext, input: NotesCreateInput): Promise<Note>;
   update(context: CommandContext, input: NotesUpdateInput): Promise<Note>;
   remove(

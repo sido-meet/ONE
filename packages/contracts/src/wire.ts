@@ -1,5 +1,5 @@
 import type { ErrorCode, Snapshot } from './index.ts';
-import { isErrorCode } from './errors.ts';
+import { isErrorCode, portableDetails } from './errors.ts';
 import { isPagePath, parsePluginView } from './page.ts';
 import type { PluginView } from './page.ts';
 
@@ -107,6 +107,9 @@ export type ClientMessage =
    * `code` 是可选的，但带上才有意义：被调用的参与者如果不报码，本体只能按
    * INTERNAL 处理，而本体与壳正是靠码把「没这个文件」「没运行」「没授权」
    * 分开说（ADR-016）。少了它，一个 NOT_FOUND 到壳那里会变成 502。
+   *
+   * `details` 同理是可选的，但少了它「对方现在是第几版」就问不出来 —— 界面只能
+   * 说「被别人改过了」而说不出改成第几版，用户没法决定是放弃自己那份还是再看一眼。
    */
   | {
       t: 'capability.result';
@@ -114,6 +117,7 @@ export type ClientMessage =
       ok: false;
       message: string;
       code?: ErrorCode;
+      details?: Record<string, unknown>;
     }
   | { t: 'ping' };
 
@@ -243,12 +247,14 @@ export function parseClientMessage(value: unknown): ClientMessage | null {
         };
       if (typeof value.message !== 'string') return null;
       const code = isErrorCode(value.code) ? value.code : undefined;
+      const details = portableDetails(value.details);
       return {
         t: 'capability.result',
         id: value.id,
         ok: false,
         message: value.message.slice(0, 200),
         ...(code ? { code } : {}),
+        ...(details ? { details } : {}),
       };
     case 'ping':
       return { t: 'ping' };

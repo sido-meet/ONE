@@ -7,6 +7,7 @@ import {
   parseCalendarUpdate,
   parseNotesCreate,
   parseNotesDelete,
+  parseNotesGet,
   parseNotesList,
   parseNotesUpdate,
   requestDigest,
@@ -61,6 +62,8 @@ const EMPTY: LocalData = {
 export interface LocalProvider {
   kind: 'calendar' | 'notes';
   list(context: CommandContext, input: unknown): Promise<unknown>;
+  /** 只有笔记有。日历的列表返回的就是完整实体，不需要再取一次。 */
+  get?(context: CommandContext, input: unknown): Promise<unknown>;
   create(context: CommandContext, input: unknown): Promise<unknown>;
   update(context: CommandContext, input: unknown): Promise<unknown>;
   remove(context: CommandContext, input: unknown): Promise<unknown>;
@@ -251,6 +254,14 @@ export function createLocalProvider(
 
   return {
     kind,
+    /**
+     * 取全文。编辑之前必须先读 —— 列表只给摘要，正文不在里面。
+     * 读操作不写盘，因此没有幂等回执可言。
+     */
+    async get(context, input) {
+      const parsed = parseNotesGet(input);
+      return structuredClone(findNote(context, parsed.id));
+    },
     async list(context, input) {
       const parsed = parseNotesList(input);
       const keyword = parsed.query?.toLowerCase();

@@ -1,4 +1,7 @@
-import { ClientError } from '../../packages/contracts/src/index.ts';
+import {
+  ClientError,
+  portableDetails,
+} from '../../packages/contracts/src/index.ts';
 import type {
   AgentId,
   CalendarEvent,
@@ -244,6 +247,10 @@ export function createCoreClient(
 
   /** 码一起发：本体的域端口与提供方靠它分流，不发就一律当 INTERNAL。 */
   const refuse = (id: string, cause: unknown) => {
+    // `details` 同理：冲突时「对方现在是第几版」在里面，丢了它界面只能显示「?」。
+    const details = portableDetails(
+      cause instanceof ClientError ? cause.details : undefined,
+    );
     void channel
       .send({
         t: 'capability.result',
@@ -251,6 +258,7 @@ export function createCoreClient(
         ok: false,
         code: cause instanceof ClientError ? cause.code : 'INTERNAL',
         message: cause instanceof Error ? cause.message : '本客户端处理失败',
+        ...(details ? { details } : {}),
       })
       .catch(() => undefined);
   };

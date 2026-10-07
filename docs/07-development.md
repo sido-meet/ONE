@@ -138,7 +138,20 @@ node .one/run-cli.mjs .one\out.json notes list '{"limit":10}'
 node .one/run-cli.mjs .one\out.json calendar list '{"rangeStart":"2026-09-01T00:00:00+08:00","rangeEnd":"2026-12-01T00:00:00+08:00","timeZone":"Asia/Shanghai"}'
 ```
 
-三条容易踩的：
+**命令行也能把笔记编辑的整条路验完**（插件页面被盖住拿不到焦点时的死路，与提议同一理由）：
+
+```powershell
+# 列表只有摘要，正文要单独取 —— 页面点「编辑」走的就是这一步
+node .one/run-cli.mjs .one\out.json notes list '{"limit":10}'
+node .one/run-cli.mjs .one\out.json notes get '{"id":"<id>"}'
+
+# 用过期版本改：应当被拒，且回执里带得上「对方现在第几版」
+node .one/run-cli.mjs .one\out.json notes update '{"id":"<id>","expectedVersion":1,"patch":{"body":"x"},"idempotencyKey":"k1"}'
+```
+
+`notes get` 不是多余的：列表按契约剥掉正文，没有它就拿不到一条能编辑的笔记。它也是核对「冲突到底有没有被静默写进去」最快的办法 —— 撞完冲突后再 `get` 一次，看版本号和正文是不是还是别人写的那一版。
+
+四条容易踩的：
 
 - **`send` 之间要隔几秒。** 单对话同时只允许一个写入 Run，连着发会拿到 `BUSY` —— 那不是失败，是排队规则。
 - **`calendar list` 的三个字段都是必填**（`rangeStart` / `rangeEnd` / `timeZone`），少一个就是一条 `VALIDATION` 报错。`timeZone` 要填 IANA 名（`Asia/Shanghai`），不是 `+08:00`。

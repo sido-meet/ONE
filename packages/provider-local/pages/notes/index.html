@@ -64,6 +64,7 @@
         align-items: baseline;
         padding: 7px 0;
         border-bottom: 1px solid var(--line);
+        flex-wrap: wrap;
       }
       li:last-child {
         border-bottom: 0;
@@ -82,6 +83,36 @@
         border-color: transparent;
         opacity: 0.65;
         padding: 2px 6px;
+      }
+      /* 编辑区占满整行：不跟标题挤在一行里，正文一长就排不开。 */
+      .editor {
+        flex: 1 0 100%;
+        display: grid;
+        gap: 6px;
+        padding: 4px 0 10px;
+      }
+      .editor textarea {
+        min-height: 110px;
+      }
+      .editor .row {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .editor .spacer {
+        flex: 1;
+      }
+      .banner {
+        padding: 7px 9px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        font-size: 12px;
+        display: grid;
+        gap: 6px;
+      }
+      .banner[data-kind='conflict'] {
+        border-color: #b3261e;
       }
       .status {
         min-height: 20px;
@@ -132,7 +163,14 @@
             clearTimeout(timer);
             window.removeEventListener('message', onMessage);
             if (data.ok) resolve(data.value);
-            else reject(new Error(data.message || '操作失败'));
+            else {
+              // **错误码要带上。** 少了它，「这条被别人改过了」与「日历源没连上」
+              // 长得一模一样，而这两件事要给的界面完全不同。
+              var failure = new Error(data.message || '操作失败');
+              failure.code = data.code;
+              failure.currentVersion = data.currentVersion;
+              reject(failure);
+            }
           }
           window.addEventListener('message', onMessage);
           window.parent.postMessage(
@@ -152,6 +190,18 @@
         node.setAttribute('data-kind', kind || 'info');
       }
 
+      /**
+       * 正在编辑的那一条。
+       *
+       * `version` 是**打开编辑器时**看到的版本 —— 保存时按它走 `expectedVersion`，
+       * 于是「我读到的和你看到的不一样」这件事由提供方去判，而不是页面自己比。
+       * 页面不判版本：它只是替用户拿着那份草稿，并在他撞上冲突时**把草稿留住**。
+       */
+      var editing = null;
+
+      /** 刚取回来的那一条全文。渲染完就清掉，不留着一份过期的。 */
+      var pendingBody = null;
+
       function when(iso) {
         var date = new Date(iso);
         if (isNaN(date.getTime())) return '';
@@ -160,6 +210,135 @@
           month: 'numeric',
           day: 'numeric',
         });
+      }
+
+      function button(text, onClick) {
+        var node = document.createElement('button');
+        node.className = 'ghost';
+        node.type = 'button';
+        node.textContent = text;
+        node.addEventListener('click', onClick);
+        return node;
+      }
+
+      function input(placeholder, value) {
+        var node = document.createElement('input');
+        node.type = 'text';
+        node.placeholder = placeholder;
+        node.autocomplete = 'off';
+        node.value = value;
+        return node;
+      }
+
+      function textarea(value) {
+        var node = document.createElement('textarea');
+        node.placeholder = '正文（可留空）';
+        node.value = value;
+        return node;
+      }
+
+      /**
+       * 编辑区。**冲突时不碰输入框。**
+       *
+       * 用户打了一段字，保存时发现别人先改了 —— 这时候清空输入框等于替他把刚打的
+       * 字扔了，而且他不会知道为什么。所以草稿一直留在框里，只在**旁边**说清楚
+       * 发生了什么，并给两个动作：重新载入（用服务器上的，丢草稿）/ 用我改的覆盖。
+       */
+      function editorFor(summary, note) {
+        var box = document.createElement('div');
+        box.className = 'editor';
+        var titleField = input('标题', note.title);
+        var bodyField = textarea(note.body);
+        var banner = document.createElement('div');
+        banner.className = 'banner';
+        banner.hidden = true;
+
+        var save = button('保存', function () {
+          save.disabled = true;
+          ask('notes.update', {
+            id: note.id,
+            expectedVersion: note.version,
+            patch: { title: titleField.value, body: bodyField.value },
+            idempotencyKey: crypto.randomUUID(),
+          })
+            .then(function () {
+              editing = null;
+              say('已保存。');
+              return refresh();
+            })
+            .catch(function (error) {
+              save.disabled = false;
+              banner.hidden = false;
+              banner.textContent = '';
+              if (error.code === 'CONFLICT') {
+                banner.setAttribute('data-kind', 'conflict');
+                // 草稿一个字不动。只给两条路，并且把后果写清楚。
+                banner.appendChild(
+                  document.createTextNode(
+                    '这条笔记在你编辑期间被改过了（它现在是第 ' +
+                      (error.currentVersion || '?') +
+                      ' 版，你手上是第 ' +
+                      note.version +
+                      ' 版）。你打的字都还在下面。',
+                  ),
+                );
+                var reload = button('放弃我的，重新载入', function () {
+                  editing = null;
+                  refresh();
+                });
+                var overwrite = button('用我改的覆盖', function () {
+                  // 覆盖要先认下**服务器当前版本**，否则只是再撞一次同样的冲突。
+                  ask('notes.get', { id: note.id })
+                    .then(function (fresh) {
+                      note = fresh;
+                      return ask('notes.update', {
+                        id: fresh.id,
+                        expectedVersion: fresh.version,
+                        patch: {
+                          title: titleField.value,
+                          body: bodyField.value,
+                        },
+                        idempotencyKey: crypto.randomUUID(),
+                      });
+                    })
+                    .then(function () {
+                      editing = null;
+                      say('已用你的版本覆盖。');
+                      return refresh();
+                    })
+                    .catch(function (again) {
+                      banner.setAttribute('data-kind', 'conflict');
+                      banner.textContent =
+                        '覆盖没有成功：' + again.message + '（你打的字还在）';
+                      save.disabled = false;
+                    });
+                });
+                var actions = document.createElement('div');
+                actions.className = 'row';
+                actions.appendChild(reload);
+                actions.appendChild(overwrite);
+                banner.appendChild(actions);
+              } else {
+                banner.setAttribute('data-kind', 'error');
+                banner.textContent = error.message;
+              }
+            });
+        });
+
+        var row = document.createElement('div');
+        row.className = 'row';
+        var cancel = button('算了', function () {
+          editing = null;
+          refresh();
+        });
+        row.appendChild(save);
+        row.appendChild(cancel);
+
+        box.appendChild(titleField);
+        box.appendChild(bodyField);
+        box.appendChild(banner);
+        box.appendChild(row);
+        return box;
       }
 
       function render(items) {
@@ -181,11 +360,22 @@
           var whenNode = document.createElement('span');
           whenNode.className = 'when';
           whenNode.textContent = when(item.updatedAt);
-          var drop = document.createElement('button');
-          drop.className = 'ghost';
-          drop.type = 'button';
-          drop.textContent = '删除';
-          drop.addEventListener('click', function () {
+
+          var edit = button('编辑', function () {
+            edit.disabled = true;
+            // **编辑之前先读全文。** 列表只给摘要，正文不在里面 ——
+            // 改不了读不到的东西。没有这一步，「编辑」就只能改标题。
+            ask('notes.get', { id: item.id })
+              .then(function (note) {
+                editing = item.id;
+                return refresh();
+              })
+              .catch(function (error) {
+                edit.disabled = false;
+                say(error.message, 'error');
+              });
+          });
+          var drop = button('删除', function () {
             drop.disabled = true;
             ask('notes.remove', {
               id: item.id,
@@ -201,16 +391,31 @@
                 drop.disabled = false;
               });
           });
+
           row.appendChild(what);
           row.appendChild(whenNode);
+          row.appendChild(edit);
           row.appendChild(drop);
+          // 正文只在打开编辑时才取，列表不预取。
+          if (editing === item.id && pendingBody) {
+            row.appendChild(editorFor(item, pendingBody));
+            pendingBody = null;
+          }
           list.appendChild(row);
         });
         host.appendChild(list);
       }
 
       function refresh() {
-        return ask('notes.list', { limit: 50 })
+        // 正在编辑的那条要先取回正文 —— 列表只给摘要，没有正文就没法编辑。
+        var loadBody = editing
+          ? ask('notes.get', { id: editing })
+          : Promise.resolve(null);
+        return loadBody
+          .then(function (note) {
+            pendingBody = note;
+            return ask('notes.list', { limit: 50 });
+          })
           .then(function (page) {
             render(page.items || []);
           })

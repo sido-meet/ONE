@@ -78,16 +78,20 @@ erDiagram
 
 `packages/contracts/src/page.ts`。协议标记 `one.plugin.v1`，页面与宿主之间只有 `postMessage` 一条路。
 
-| 消息         | 字段                                  | 谁发        | 说明                                                 |
-| ------------ | ------------------------------------- | ----------- | ---------------------------------------------------- |
-| PageRequest  | `protocol, id, capability, args`      | 页面 → 宿主 | `capability` 是能力名（`calendar.list`），不是命令名 |
-| PageResponse | `protocol, id, ok, value? / message?` | 宿主 → 页面 | 失败必须给 `message`，不许用空结果冒充成功           |
+| 消息         | 字段                                                            | 谁发        | 说明                                                 |
+| ------------ | --------------------------------------------------------------- | ----------- | ---------------------------------------------------- |
+| PageRequest  | `protocol, id, capability, args`                                | 页面 → 宿主 | `capability` 是能力名（`calendar.list`），不是命令名 |
+| PageResponse | `protocol, id, ok, value? / message? / code? / currentVersion?` | 宿主 → 页面 | 失败必须给 `message`，不许用空结果冒充成功           |
 
 三条不能省的约束：
 
 - **能力名 → 命令名由宿主翻译**（`PAGE_DOMAIN_COMMANDS`）。`calendar.remove` 对应的本体命令是 `calendarDelete`，靠改写字符串得到的是另一个不存在的命令；而且翻译之后输入会**再过一次本体边界的校验**（ADR-016），直接按能力名转发会绕过那一次。
 - **页面没有身份字段。** 上下文 `workspaceId` / `source` 由宿主补，页面报了也不作数。宿主靠**窗口绑定**知道这个窗口属于哪个提供方（ADR-018 第 3 条）。
 - **页面路径受守卫**（`isPagePath`）：相对、无 `..`、无反斜杠，入口非法就当没申报 —— 宿主会把它拼进 `one-plugin://` 地址，坏路径必须在协议解析那一层挡住。
+
+失败回执上的 `code` 与 `currentVersion` 是后加的两个可选字段：少了 `code`，「这条被别人改过了」与「日历源没连上」在页面上长得一模一样，而这两件事要给的界面完全不同（前者要留住用户打的字，后者只提示重试）；少了 `currentVersion`，界面只能说「被改过了」而给不出对方现在是第几版，用户没法决定是放弃自己那份还是再看一眼。`currentVersion` 只在 `code` 是 `CONFLICT` 且值是数字时才给，不猜。
+
+**这两个字段要能从本体一路走到页面，中间一站都不能少**：`ClientError.details.currentVersion` → 提供方 `capability.result` 的 `details` → 本体还原 `ClientError` → `result.error.details` → 页面回执。这里曾经断了一环（ADR-024），断的时候没有任何一方报错，界面只是安静地显示一个问号。
 
 协议本身随 wire v3 走：参与者在 `hello.client.view` 里申报入口，宿主用 `page.read` 向本体要资源。**为什么升版本而不是加个可选字段**：v2 的本体会静默丢掉这个字段，于是页面永远打不开而没有任何一方报错 —— 那正是版本守卫要挡住的情况。
 
@@ -148,6 +152,7 @@ erDiagram
 | calendar.update | id, expectedVersion, patch, idempotencyKey         | 新版本；冲突返回 CONFLICT         |
 | calendar.delete | id, expectedVersion, idempotencyKey                | 删除结果与审计引用                |
 | notes.list      | query?, cursor?, limit                             | 摘要列表，不默认加载全部正文      |
+| notes.get       | id                                                 | 单条全文                          |
 | notes.create    | title, body, sourceConversationId?, idempotencyKey | Note                              |
 | notes.update    | id, expectedVersion, patch, idempotencyKey         | Note 新版本                       |
 | notes.delete    | id, expectedVersion, idempotencyKey                | 删除结果                          |
@@ -155,6 +160,8 @@ erDiagram
 P03 把此草案写成 TypeScript 类型和运行时校验 schema。TypeScript 只负责编译期，IPC/MCP 输入必须在入口做运行时校验。UI 与 MCP 都调用同一领域方法，时间校验和幂等规则不能复制两套。
 
 已实现：输入 schema 拒绝未知字段、要求带偏移的 RFC3339 时间、校验 IANA 时区与正时长；幂等以 `(workspaceId, idempotencyKey)` 为键保存请求摘要与结果，同键同输入回放原结果、同键异输入报 CONFLICT。笔记列表只返回摘要，正文不默认加载。删除返回 `auditRef`，0.1 的审计条目仅存在内存中。
+
+`notes.get` 不是给日历也补一遍的冗余：日历的列表本来就返回完整实体，而笔记列表按契约剥掉正文，没有 `get` 就没法编辑一条笔记。能力按域分开申报（`CALENDAR_ACTIONS` / `NOTES_ACTIONS`），共用一张表会让「给笔记加 get」同时要求日历也提供 get，日历没有就会被判成「没授权」——那是两种完全不同的失败。
 
 ## 事件与 Run 状态
 

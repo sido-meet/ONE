@@ -1,7 +1,8 @@
 import path from 'node:path';
 import net from 'node:net';
 import { fileURLToPath } from 'node:url';
-import { ClientError } from '../../contracts/src/index.ts';
+import { ClientError, portableDetails } from '../../contracts/src/index.ts';
+import { CALENDAR_ACTIONS, NOTES_ACTIONS } from '../../contracts/src/index.ts';
 import { PAGE_READ_CAPABILITY } from '../../contracts/src/page.ts';
 import { WIRE_VERSION } from '../../contracts/src/wire.ts';
 import type { ClientMessage, CoreMessage } from '../../contracts/src/wire.ts';
@@ -38,12 +39,22 @@ const KINDS = [
   { id: 'local.notes', kind: 'notes' as const },
 ];
 
-const ACTIONS = ['list', 'create', 'update', 'remove'] as const;
+/**
+ * 能力名跟着**域**走，不是一张共用的表。
+ *
+ * 共用会让笔记多一条 `get` 时日历也跟着被要求那一条，于是本体核对申报发现日历
+ * 缺能力，把整个日历判成「没授权」（这条判据本身是对的：宁可报没授权，也不要把
+ * 残缺的提供方当完整的用）。日历不需要 `get` —— 它的列表返回的就是完整实体。
+ */
+const ACTIONS_OF: Record<string, readonly string[]> = {
+  calendar: CALENDAR_ACTIONS,
+  notes: NOTES_ACTIONS,
+};
 
 /** 一个提供方进程同时提供日历与笔记，但各连一根管道 —— 寻址键必须唯一。 */
 function connectAs(pipe: string, identity: { id: string; kind: string }) {
   const capabilities = [
-    ...ACTIONS.map((action) => `${identity.kind}.${action}`),
+    ...ACTIONS_OF[identity.kind]!.map((action) => `${identity.kind}.${action}`),
     // 页面也是这个进程的一部分：它声明 page.read，本体才会把宿主的取页请求转过来。
     PAGE_READ_CAPABILITY,
   ];
@@ -153,12 +164,19 @@ function connectAs(pipe: string, identity: { id: string; kind: string }) {
     } catch (error) {
       // 码要一起发出去：本体与壳靠它把「没有这个文件」「没有授权」「里面坏了」
       // 分开说，只发一句话的话，上游只能一律当成内部错误（ADR-016）。
+      //
+      // `details` 同样要带：冲突时「对方现在是第几版」就在里面，少了它界面只能说
+      // 「被改过了」而给不出版本，用户没法决定是放弃自己那份还是再看一眼对方那份。
+      const details = portableDetails(
+        error instanceof ClientError ? error.details : undefined,
+      );
       await ask({
         t: 'capability.result',
         id: message.id,
         ok: false,
         code: error instanceof ClientError ? error.code : 'INTERNAL',
         message: error instanceof Error ? error.message : '提供方处理失败',
+        ...(details ? { details } : {}),
       });
     }
   }

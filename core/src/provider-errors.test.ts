@@ -13,6 +13,7 @@ import type {
 } from '../../packages/contracts/src/index.ts';
 import {
   PROVIDER_CONTRACT_VERSION,
+  parseClientMessage,
   providerNotAuthorized,
   providerNotInstalled,
   providerNotRunning,
@@ -314,5 +315,57 @@ describe('core dispatching domain commands', () => {
     const snapshot = runtime.getSnapshot();
     expect(snapshot).not.toHaveProperty('notes');
     expect(snapshot).not.toHaveProperty('calendarEvents');
+  });
+});
+
+/**
+ * `details` 跨进程这一段（实机验收补上的）。
+ *
+ * 界面上「它现在是第 ? 版」那个问号就是这么来的：提供方把版本号放在 details 里，
+ * 而本体在进程边界只带了 code 与 message。少这一段，冲突就只能说「被改过了」，
+ * 用户没法决定是放弃自己那份还是再看一眼对方那份。
+ */
+describe('details 跨进程', () => {
+  const failure = (details: unknown) =>
+    parseClientMessage({
+      t: 'capability.result',
+      id: 'r1',
+      ok: false,
+      code: 'CONFLICT',
+      message: '这条已被其他操作更新',
+      details,
+    });
+
+  it('版本号原样带到本体', () => {
+    expect(failure({ expectedVersion: 1, currentVersion: 3 })).toMatchObject({
+      t: 'capability.result',
+      ok: false,
+      code: 'CONFLICT',
+      details: { expectedVersion: 1, currentVersion: 3 },
+    });
+  });
+
+  it('报错的一方写什么不是由它说了算：只放行扁平的基本类型', () => {
+    // details 来自被调用的那一方，是不可信输入。带过去的结构化内容会让上游界面
+    // 去显示它没准备过的东西，丢掉只是少一条附加信息。
+    expect(failure({ currentVersion: 3, note: { a: 1 } })).toMatchObject({
+      details: { currentVersion: 3 },
+    });
+    expect(failure({ list: [1, 2] })).toMatchObject({});
+    expect(failure('nope')).toMatchObject({});
+    expect(failure({})).toMatchObject({});
+    expect(failure([{ currentVersion: 3 }])).toMatchObject({});
+    // 数字要有限值：NaN 序列化过去会变成 null，对面只会拿到一个看不懂的东西。
+    expect(failure({ currentVersion: Number.NaN })).toMatchObject({});
+    expect(failure({ currentVersion: Number.POSITIVE_INFINITY })).toMatchObject(
+      {},
+    );
+    // 键数有上限，别让人拿它当运货的地方。
+    const wide = Object.fromEntries(
+      Array.from({ length: 20 }, (_, index) => [`k${index}`, index]),
+    );
+    const kept = failure(wide);
+    const keptDetails = kept && 'details' in kept ? (kept.details ?? {}) : {};
+    expect(Object.keys(keptDetails).length).toBeLessThanOrEqual(8);
   });
 });

@@ -91,6 +91,57 @@ describe('提供方注册表', () => {
     expect(slot?.missingPermissions).toEqual(['calendar.remove']);
   });
 
+  /**
+   * 两个域各有一份动作表，**这不是冗余**。
+   *
+   * 共用一份的话，笔记多一条 `notes.get` 时日历也会被要求那一条；而日历的列表
+   * 返回的就是完整实体，它压根不需要 `get`。于是注册表核对申报发现日历缺能力，
+   * 把好端端的日历判成「没授权」—— 一个只给笔记加能力的动作，弄坏了另一个域。
+   */
+  it('笔记要 get，日历不要 —— 两份动作表不是冗余', () => {
+    const notesCore: Core = createCore(createMockClient(), {
+      version: 'test',
+      installed: ['local.notes', 'local.calendar'],
+    });
+    const registry = createProviderRegistry(notesCore, [
+      { id: 'local.notes', kind: 'notes' },
+      { id: 'local.calendar', kind: 'calendar' },
+    ]);
+    const sent: CoreMessage[] = [];
+    const connect = (
+      provider: string,
+      label: string,
+      capabilities: string[],
+    ) => {
+      const session = notesCore.connect(
+        { send: (m: CoreMessage) => sent.push(m), close: () => undefined },
+        {
+          t: 'hello',
+          v: WIRE_VERSION,
+          client: { role: 'provider', provider, label, capabilities },
+        },
+      );
+      if (!session) throw new Error('握手被拒');
+      return session;
+    };
+
+    // 日历只报四个能力，没有 get —— 它不需要。
+    connect('local.calendar', '本地日历', CALENDAR_ABILITIES);
+    // 笔记少报 get 就是残缺的：编辑会在半路才失败，不能放行。
+    connect('local.notes', '本地笔记', [
+      'notes.list',
+      'notes.create',
+      'notes.update',
+      'notes.remove',
+    ]);
+
+    expect(registry.calendar()?.status).toBe('ready');
+    expect(registry.notes()).toMatchObject({
+      status: 'denied',
+      missingPermissions: ['notes.get'],
+    });
+  });
+
   it('没有登记的种类一律按没安装处理', () => {
     const { registry } = setup();
     // 笔记压根没登记：这不是"装了没运行"，用户该看到的是"还没接笔记源"。

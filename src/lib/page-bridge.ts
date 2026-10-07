@@ -112,8 +112,24 @@ export function attachPluginPage(options: {
               cause instanceof ClientError || cause instanceof Error
                 ? cause.message
                 : '本体处理失败',
+            // 错误码一起给。页面要靠它分「这条被别人改过了」与「日历源没连上」——
+            // 这两件事要给的界面完全不同：前者得把用户打的字留在框里，后者只提示重试。
+            ...(cause instanceof ClientError ? { code: cause.code } : {}),
+            // 冲突时服务器当前是第几版：说「被别人改过了」而不说改成什么了，
+            // 用户没法决定是放弃自己的还是再看看对方的。
+            ...(typeof conflictVersion(cause) === 'number'
+              ? { currentVersion: conflictVersion(cause) }
+              : {}),
           }),
       );
+  };
+
+  /** 只认 CONFLICT 的 details.currentVersion，别的一律不给。 */
+  const conflictVersion = (cause: unknown): number | undefined => {
+    if (!(cause instanceof ClientError) || cause.code !== 'CONFLICT')
+      return undefined;
+    const value = cause.details?.['currentVersion'];
+    return typeof value === 'number' ? value : undefined;
   };
 
   host.addEventListener('message', handle);

@@ -8,7 +8,7 @@ import type {
   ProviderId,
   ProviderSlot,
 } from '../../../packages/contracts/src/index.ts';
-import { DOMAIN_ACTIONS } from '../../../packages/contracts/src/index.ts';
+import { ACTIONS_OF } from '../../../packages/contracts/src/index.ts';
 import type { Core } from '../core.ts';
 
 /**
@@ -32,7 +32,6 @@ export interface ProviderDeclaration {
   missingPermissions?: readonly string[];
 }
 
-const ACTIONS = DOMAIN_ACTIONS;
 type Action = DomainAction;
 
 export function createProviderRegistry(
@@ -55,7 +54,7 @@ export function createProviderRegistry(
    */
   const portFor = (kind: DomainKind, target: ProviderId) =>
     Object.fromEntries(
-      ACTIONS.map((action) => [
+      ACTIONS_OF[kind].map((action) => [
         action,
         (context: CommandContext, input: unknown): Promise<unknown> =>
           core.invoke(target, `${kind}.${action}`, { context, input }),
@@ -83,8 +82,8 @@ export function createProviderRegistry(
       };
     // 提供方少申报了这类能力里的任何一个动作，本体都不放行：宁可报「没授权」，
     // 也不能把一个残缺的提供方当成完整的用，那会让调用在半路才失败。
-    const missing = ACTIONS.filter(
-      (action: Action) => !session.capabilities.includes(`${kind}.${action}`),
+    const missing = ACTIONS_OF[kind].filter(
+      (action) => !session.capabilities.includes(`${kind}.${action}`),
     );
     if (missing.length)
       return {

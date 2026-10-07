@@ -5,6 +5,7 @@ import { WIRE_VERSION } from '../../packages/contracts/src/wire.ts';
 /** 动作 → 本体白名单命令的后缀。两层命名不同：命令是本体 API，能力是提供方 API。 */
 const ACTION_SUFFIX: Record<string, string> = {
   list: 'List',
+  get: 'Get',
   create: 'Create',
   update: 'Update',
   remove: 'Delete',

@@ -8,6 +8,7 @@ import type {
 import { createCore } from './core.ts';
 import type { Core } from './core.ts';
 import { WIRE_VERSION } from '../../packages/contracts/src/wire.ts';
+import { parseCoreMessage } from '../../packages/contracts/src/wire.ts';
 
 /** 一个参与者的收发端，带上它收到的所有消息。 */
 function fakeClient() {
@@ -176,6 +177,52 @@ describe('ONE core', () => {
     expect(lastResult(desktop)).toMatchObject({
       ok: true,
       value: { mood: 'idle' },
+    });
+  });
+
+  it('对方报错时把 details 一起带到 —— 少了它就问不出「现在是第几版」', async () => {
+    // 实机验收抓到的：横幅上写的是「第 ? 版」。提供方明明报了 currentVersion，
+    // 是本体在进程边界把它扔了，于是界面只能说「被改过了」却给不出版本。
+    const pet = fakeClient();
+    const desktop = fakeClient();
+    const petSession = core.connect(
+      pet.connection,
+      hello('pet', ['pet.state']),
+    );
+    const desktopSession = core.connect(desktop.connection, hello('desktop'));
+    if (!petSession || !desktopSession) throw new Error('handshake failed');
+
+    core.handleMessage(desktopSession, {
+      t: 'capability.call',
+      id: 'c2',
+      target: 'pet',
+      capability: 'pet.state',
+    });
+    const request = pet.received.at(-1);
+    if (request?.t !== 'invoke') throw new Error('no invoke');
+    core.handleMessage(petSession, {
+      t: 'capability.result',
+      id: request.id,
+      ok: false,
+      code: 'CONFLICT',
+      message: '这条已被其他操作更新',
+      details: { expectedVersion: 1, currentVersion: 3 },
+    });
+
+    const answer = lastResult(desktop);
+    expect(answer).toMatchObject({
+      ok: false,
+      error: {
+        code: 'CONFLICT',
+        details: { expectedVersion: 1, currentVersion: 3 },
+      },
+    });
+    // 走线上帧再走一遍：解析不认识这个字段的话，到页面手上又会没了。
+    const raw = desktop.sent.at(-1) ?? '';
+    const wire = parseCoreMessage(JSON.parse(raw));
+    expect(wire).toMatchObject({
+      ok: false,
+      error: { details: { currentVersion: 3 } },
     });
   });
 

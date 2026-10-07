@@ -253,6 +253,18 @@ export function createMemoryProviders(): MemoryProviders {
       return paginate(summaries, input.cursor, input.limit);
     },
 
+    async get(context, input): Promise<Note> {
+      assertOpen();
+      const note = state.notes.find(
+        (item) =>
+          item.id === input.id && item.workspaceId === context.workspaceId,
+      );
+      // 找不到就说找不到，不拿「一条也没有」冒充 —— 那是两种完全不同的界面动作。
+      if (!note)
+        throw new ClientError('NOT_FOUND', '找不到这条笔记，可能已经删掉了');
+      return structuredClone(note);
+    },
+
     async create(context, input) {
       assertOpen();
       const digest = requestDigest(input);

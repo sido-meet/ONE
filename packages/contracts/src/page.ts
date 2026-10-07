@@ -15,6 +15,9 @@
  *    么、不带实现前缀（ADR-017），插件因此不必知道 ONE 内部把 remove 叫成 delete。
  */
 
+import { isErrorCode } from './errors.ts';
+import type { ErrorCode } from './errors.ts';
+
 /** 宿主与页面之间的消息协议标记。两侧都要对得上，否则当成不是自己人的消息丢掉。 */
 export const PAGE_PROTOCOL = 'one.plugin.v1';
 
@@ -75,6 +78,8 @@ export const PAGE_DOMAIN_COMMANDS = {
   'calendar.update': 'calendarUpdate',
   'calendar.remove': 'calendarDelete',
   'notes.list': 'notesList',
+  // 笔记专用：日历的列表返回的就是完整实体，不需要再取一次。
+  'notes.get': 'notesGet',
   'notes.create': 'notesCreate',
   'notes.update': 'notesUpdate',
   'notes.remove': 'notesDelete',
@@ -101,7 +106,30 @@ export type PageResponse =
       ok: true;
       value: unknown;
     }
-  | { protocol: typeof PAGE_PROTOCOL; id: string; ok: false; message: string };
+  | {
+      protocol: typeof PAGE_PROTOCOL;
+      id: string;
+      ok: false;
+      message: string;
+      /**
+       * 领域错误码，**可选**。
+       *
+       * 没有它的话页面只拿到一句人话，于是「这条被别人改过了」（CONFLICT）与
+       * 「日历源没连上」长得一模一样 —— 而这两件事要给的界面完全不同：前者得把
+       * 用户打的字留在框里，后者只该提示重试。
+       *
+       * 可选是为了老页面还能收：它们只看 `message`，多一个字段不会把旧页面弄坏，
+       * 所以这里不需要升协议版本（升版本的判据是「旧的一端会**静默**出错」）。
+       */
+      code?: ErrorCode;
+      /**
+       * 冲突时服务器当前的版本号。只在 `code === 'CONFLICT'` 时给。
+       *
+       * 「被别人改过了」这句话本身不够：用户得知道改成什么了，才决定是放弃自己
+       * 那份还是再看一眼对方的。
+       */
+      currentVersion?: number;
+    };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -142,6 +170,12 @@ export function parsePageResponse(value: unknown): PageResponse | null {
     id: value.id,
     ok: false,
     message: value.message.slice(0, 200),
+    // 不认识就不给。页面据此分「冲突」与「连不上」，猜一个错的比没有更糟。
+    ...(isErrorCode(value.code) ? { code: value.code } : {}),
+    // 当前版本只认数字，且不跟一个非 CONFLICT 的码一起出现 —— 不然就是编的。
+    ...(value.code === 'CONFLICT' && typeof value.currentVersion === 'number'
+      ? { currentVersion: value.currentVersion }
+      : {}),
   };
 }
 

@@ -94,7 +94,23 @@ export interface NotesListInput {
   limit?: number;
 }
 
-/** Notes list returns summaries only; bodies load through notesGet in later rounds. */
+/**
+ * 取一条笔记的**全文**。
+ *
+ * 存在的理由只有一个：笔记列表只给摘要（`NoteSummary` 没有 `body`），所以用户
+ * 点「编辑」时必须先取回正文 —— **改不了读不到的东西**。日历不需要这条：
+ * `CalendarPage.items` 本来就是完整实体。
+ */
+export interface NotesGetInput {
+  id: string;
+}
+
+export function parseNotesGet(input: unknown): NotesGetInput {
+  const raw = shape(input, '笔记读取', ['id']);
+  return { id: text(raw.id, '笔记 ID', LIMITS.id) };
+}
+
+/** Notes list returns summaries only; bodies load through notesGet. */
 export interface NoteSummary {
   id: string;
   title: string;
