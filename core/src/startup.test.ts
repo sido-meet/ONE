@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { becomeTheCore, providerScriptsOf } from './startup.ts';
+import { becomeTheCore, providerEntriesOf } from './startup.ts';
 
 /**
  * 这组测试守着一条实机挖出来的规矩：**确定「我是不是那个本体」之前，不许有任何副作用。**
@@ -82,38 +82,40 @@ describe('本体启动的先后', () => {
 });
 
 describe('拉起哪几个提供方', () => {
-  const scripts = {
-    'local.calendar': 'provider:local',
-    'local.notes': 'provider:local',
+  // 值是相对 repoRoot 的入口路径，不是脚本名（ADR-030）。这里用真实的那张表 ——
+  // 测一份与代码里不同的假数据，很容易让测试在改名换值之后还照样绿。
+  const entries = {
+    'local.calendar': 'packages/provider-local/src/main.ts',
+    'local.notes': 'packages/provider-local/src/main.ts',
   };
 
-  it('同一个脚本只算一次 —— 拉两次就有两个进程各报一次身份', () => {
+  it('同一个入口只算一次 —— 拉两次就有两个进程各报一次身份', () => {
     // 名册里凭空多出两个参与者，调用时还会挑中先来的那个，用户看到的现象是
     // 「我改了日历，界面没反应」。ADR-017：一个寻址键只能有一个参与者在跑。
     expect(
-      providerScriptsOf(['local.calendar', 'local.notes'], scripts),
-    ).toEqual(['provider:local']);
+      providerEntriesOf(['local.calendar', 'local.notes'], entries),
+    ).toEqual(['packages/provider-local/src/main.ts']);
   });
 
   it('没装的寻址键不拉 —— 凭空多一个参与者比少一个更坏', () => {
-    expect(providerScriptsOf(['pet'], scripts)).toEqual([]);
-    expect(providerScriptsOf([], scripts)).toEqual([]);
+    expect(providerEntriesOf(['pet'], entries)).toEqual([]);
+    expect(providerEntriesOf([], entries)).toEqual([]);
   });
 
-  it('没有启动器的寻址键也不拉，而不是拿一个空脚本名去 spawn', () => {
+  it('没有入口的寻址键也不拉，而不是拿一个空路径去 spawn', () => {
     expect(
-      providerScriptsOf(['local.calendar', 'outlook.calendar'], scripts),
-    ).toEqual(['provider:local']);
+      providerEntriesOf(['local.calendar', 'outlook.calendar'], entries),
+    ).toEqual(['packages/provider-local/src/main.ts']);
   });
 
   it('顺序跟着安装清单来，日志每次都一样', () => {
     const both = {
-      'local.notes': 'provider:local',
-      'local.calendar': 'provider:notes',
+      'local.notes': 'packages/provider-local/src/main.ts',
+      'local.calendar': 'packages/outlook-local/src/main.ts',
     };
-    expect(providerScriptsOf(['local.calendar', 'local.notes'], both)).toEqual([
-      'provider:notes',
-      'provider:local',
+    expect(providerEntriesOf(['local.calendar', 'local.notes'], both)).toEqual([
+      'packages/outlook-local/src/main.ts',
+      'packages/provider-local/src/main.ts',
     ]);
   });
 });

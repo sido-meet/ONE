@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type net from 'node:net';
 import path from 'node:path';
@@ -21,7 +22,7 @@ import { PIPE_PATH, serveOnPipe } from './pipe.ts';
 import { createProviderRegistry } from './providers/registry.ts';
 import type { ProviderDeclaration } from './providers/registry.ts';
 import { readInstalled, writeInstalled } from './installed.ts';
-import { becomeTheCore, providerScriptsOf } from './startup.ts';
+import { becomeTheCore, providerEntriesOf } from './startup.ts';
 import { dataDir as resolveDataDir } from '../../packages/hostpaths/src/index.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -50,45 +51,86 @@ const declarations: ProviderDeclaration[] = [
 ];
 
 /**
- * 启动器由宿主注入：core 只知道"要启动一个寻址键"，不关心它是 pnpm 脚本、
- * 打包后的 exe 还是别的什么。
+ * 启动器由宿主注入：core 只知道"要启动一个寻址键"，不关心它是哪个文件。
  *
  * 客户端和提供方走的是**同一条**路，core 不知道自己在启动谁 —— 日历提供方不
- * 需要本体为它写任何特判（ADR-016/017）。寻址键到脚本名的映射是宿主的事。
+ * 需要本体为它写任何特判（ADR-016/017）。寻址键到入口的映射是宿主的事。
+ *
+ * 值是**相对 repoRoot 的入口路径**，不是 pnpm 脚本名（ADR-030）。开发环境的根是
+ * 仓库、产物环境的根是 `dist-runtime/`，而打包搬过去的是同一批相对路径，所以同一
+ * 张表在两边都成立 —— 按环境分叉等于把这个坑复制成两份。
  */
-const LAUNCH_SCRIPTS: Record<string, string> = {
-  'local.calendar': 'provider:local',
-  'local.notes': 'provider:local',
+const LAUNCH_ENTRIES: Record<string, string> = {
+  'local.calendar': 'packages/provider-local/src/main.ts',
+  'local.notes': 'packages/provider-local/src/main.ts',
 };
 
 /**
- * 拉起一个后台脚本。
+ * 可视客户端的入口（ADR-030 第 5 点）。
  *
- * **`windowsHide: true` 是这里唯一要紧的一行。** 少了它，Windows 会给每个子
+ * 只有 `ONE_LAUNCH_CLIENT` 会走这条路，而壳从不设那个变量 —— 它是开发与验收时让
+ * 本体当入口用的。发布包里也**没有** `scripts/`：exe 自己就是客户端，不需要本体再拉
+ * 一个 `node scripts/client.mjs`。所以这张表在发布环境里必然指向不存在的文件，
+ * `launchEntry` 会把这件事说清楚，而不是让它报一句笼统的「拉不起来」。
+ */
+const CLIENT_ENTRIES: Record<string, string> = {
+  pet: 'scripts/client.mjs',
+  desktop: 'scripts/client.mjs',
+};
+
+/**
+ * 拉起一个后台进程。
+ *
+ * **用 `process.execPath` 而不是 `pnpm`。** 本体进程自己就是那个随包携带的
+ * `node.exe`（ADR-021），指向它的路径就够跑提供方了。曾经这里绕道
+ * `spawn('pnpm', ['provider:local'], { shell: true })` —— 于是发布出去的东西要求目标
+ * 机器先装好 pnpm 和 node，而本体起得来、日历与笔记永远不接上，用户只看到一句
+ * 「装了没运行」（ADR-030）。
+ *
+ * **`windowsHide: true` 仍然是这里唯一要紧的一行。** 少了它，Windows 会给每个子
  * 进程开一个控制台窗口：用户双击 ONE 之后，桌面上凭空闪出一个黑框，写着
  * `node packages/provider-local/src/main.ts` 然后杵在那里不消失 —— 插件成了
  * 主角，用户成了看客。「后台启动」在 Windows 上不是 `detached` 就够了，
  * 还得明确说「别给我开窗」。
  *
  * `stdio: 'ignore'` 同理：提供方的标准输出不进本体，用户要排障时看本体日志就够
- * 了，几条提供方的输出混进来只会把真正那条错误淹掉。
+ * 了，几条提供方的输出混进来只会把真正那条错误淹掉。也正因为它被丢掉，**入口文件
+ * 存不存在必须在这里自己查**：`spawn` 只在可执行文件找不到时才报错，而入口缺失
+ * 的话子进程会起来又立刻退出，那句 `MODULE_NOT_FOUND` 我们一个字都读不到。
  */
-async function launchScript(script: string) {
-  const child = spawn('pnpm', [script], {
+function launchEntry(entry: string, args: readonly string[] = []) {
+  const full = path.join(repoRoot, entry);
+  if (!existsSync(full)) {
+    return Promise.reject(
+      new Error(
+        `入口不存在：${full}\n` +
+          (entry.startsWith('scripts/')
+            ? 'scripts/ 只在仓库里有，发布产物里不带 —— 发布包里的可视客户端由 exe 自己起，不需要本体再拉一次。'
+            : '执行 pnpm core:package 让它进产物。'),
+      ),
+    );
+  }
+  const child = spawn(process.execPath, [full, ...args], {
     cwd: repoRoot,
     detached: true,
     stdio: 'ignore',
-    shell: true,
     windowsHide: true,
   });
   child.on('error', (error) => {
-    process.stderr.write(`ONE 本体：拉起 ${script} 失败：${error.message}\n`);
+    process.stderr.write(`ONE 本体：拉起 ${entry} 失败：${error.message}\n`);
   });
   child.unref();
+  return Promise.resolve();
 }
 
-const launchClient = (provider: ProviderId) =>
-  launchScript(LAUNCH_SCRIPTS[provider] ?? `client:${provider}`);
+const launchClient = (provider: ProviderId) => {
+  const entry = CLIENT_ENTRIES[provider];
+  if (!entry)
+    return Promise.reject(
+      new Error(`${provider} 没有客户端入口，不知道该拉起哪个文件`),
+    );
+  return launchEntry(entry, [provider]);
+};
 
 const installed = readInstalled(dataDir());
 
@@ -186,14 +228,14 @@ backupService = createBackupService({
 process.stderr.write(`ONE 本体：备份目录 ${backupService.exportDir()}\n`);
 
 /**
- * 拉起安装清单里的提供方，得到一串脚本名。
+ * 拉起安装清单里的提供方，得到一串**入口路径**。
  *
- * 去重按**脚本**而不是寻址键 —— 日历与笔记由同一个进程提供，拉两次就是两个进程各报
+ * 去重按**入口**而不是寻址键 —— 日历与笔记由同一个进程提供，拉两次就是两个进程各报
  * 一次身份。规矩本身在 startup.ts 里（那里还有另一半：抢管道之前一个都不许拉）。
  */
-const providerScripts = providerScriptsOf(
+const providerEntries = providerEntriesOf(
   installedProviders.map((item) => item.id),
-  LAUNCH_SCRIPTS,
+  LAUNCH_ENTRIES,
 );
 
 let server: net.Server | null = null;
@@ -228,15 +270,15 @@ const becameTheCore = await becomeTheCore({
     },
     // 拉不起来的由提供方自己报错退出：本体不能因为一个插件缺失就不启动。
     // 但**拉不起来这件事本身必须说得出口** —— spawn 的错误是异步的，try/catch 抓不到，
-    // 只会走到 launchScript 里的 error 监听器，那一句是写给终端看的。用户看到的是
+    // 只会走到 launchEntry 里的 error 监听器，那一句是写给终端看的。用户看到的是
     // 「装了没运行」，却不知道为什么。
-    ...providerScripts.map((script) => async () => {
-      process.stderr.write(`ONE 本体：正在拉起 ${script}\n`);
+    ...providerEntries.map((entry) => async () => {
+      process.stderr.write(`ONE 本体：正在拉起 ${entry}\n`);
       try {
-        await launchScript(script);
+        await launchEntry(entry);
       } catch (error) {
         process.stderr.write(
-          `ONE 本体：拉起 ${script} 失败：${String(error)}\n`,
+          `ONE 本体：拉起 ${entry} 失败：${String(error)}\n`,
         );
       }
     }),

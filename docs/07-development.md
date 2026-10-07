@@ -51,6 +51,8 @@ desktop:build 当前只构建可执行程序，不生成安装包。Tauri 标识
 
 启动本体有两种方式（ADR-021）：仓库里跑源码（开发用，系统 `node`），或用 `pnpm core:package` 产出的随包运行时（发布用，自带 `node.exe`，机器上没装 node 也能跑）。壳**优先找产物**，找不到才回退源码；两处都没有时它会停下来说清找过哪儿，而不是表现成「本体没接上」。
 
+产物里现在有**本体与提供方两套源码**（ADR-030）。本体拉起提供方用的是 `process.execPath` —— 它指向的就是那个随包携带的 `node.exe`，所以提供方也跟着不依赖机器上的 node 与 pnpm。曾经这里绕道 `spawn('pnpm', ['provider:local'], { shell: true })`：本体起得来、日历与笔记永远不接上，而原因（缺 pnpm）藏在发布包里。入口表在 `core/src/index.ts` 的 `LAUNCH_ENTRIES`，值是**相对 `repoRoot` 的路径**；开发环境的根是仓库、产物环境的根是 `dist-runtime/`，打包搬过去的是同一批相对路径，所以同一张表两边都成立。`scripts/client.mjs` 不在产物里 —— 那是开发环境专用的可视客户端入口，发布包里 exe 自己就是客户端；真去设 `ONE_LAUNCH_CLIENT`，本体会明确说「入口不存在、scripts/ 不在产物里」，而不是笼统的拉不起来。
+
 源码路径靠 `ONE_REPO_ROOT`（或从编译期的 `CARGO_MANIFEST_DIR` 向上找到 `core/src/index.ts`）定位。客户端种类有两种传法：已构建的 exe 用 `--client=pet`，`tauri dev` 用 `ONE_CLIENT=pet`（Tauri CLI 会把 `--client=` 错位传给 cargo）。`ONE_CORE_RUNTIME` 可以显式指定产物目录，联调时用得上。
 
 ## 双击就能用：不需要先开终端
@@ -82,7 +84,7 @@ node core\src\index.ts install local.calendar local.notes   # 或 pnpm core:cli 
 ```powershell
 pnpm core            # 只启动 ONE 本体
 pnpm core:cli list   # 用命令行客户端看本体持有的状态与名册
-pnpm core:package    # 打出本体的可分发产物到 dist-runtime/（node.exe + core + 清单）
+pnpm core:package    # 打出本体的可分发产物到 dist-runtime/（node.exe + core + provider-local + 清单）
 pnpm pet:dev         # 宠物客户端（tauri dev）
 pnpm desktop:dev     # 桌面端客户端（tauri dev）
 pnpm desktop:build   # 原生可执行程序（release），会重新嵌入前端资源

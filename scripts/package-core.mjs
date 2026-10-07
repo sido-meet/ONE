@@ -37,6 +37,15 @@ const NEEDED = [
   // sqlite 是本体与本地提供方共用的 pragma 与事务助手（ADR-028）。两个库的配置必须
   // 一致，分开写迟早漂；它在 import 图上，少了它本体第一次开库就找不到模块。
   { from: path.join(packagesDir, 'sqlite'), to: 'packages/sqlite' },
+  // provider-local 随包走（ADR-030）。不带走它，发布出去的本体起得来、日历与笔记
+  // 却永远不接上，用户只看到「装了没运行」；而它要跑起来就**不能**再回头去找系统
+  // node —— 本体拉子进程用的是自己那个随包 node.exe（ADR-021），所以这份源码必须
+  // 就在产物里。它的 import 只有 contracts / hostpaths / sqlite 与 node: 内置模块，
+  // 上头四条已经齐了。
+  {
+    from: path.join(packagesDir, 'provider-local'),
+    to: 'packages/provider-local',
+  },
 ];
 
 /** 测试文件不带：发布产物里不需要 vitest，也省得让人以为本体依赖它。 */

@@ -588,3 +588,30 @@ export type ClientKind = 'pet' | 'desktop' | 'cli';
 **协议影响**：新增能力名 `data.export` / `data.import`。可选新增、旧客户端不匹配任何分支即忽略，**不升 `WIRE_VERSION`**。
 
 **迁移影响**：新增 `packages/contracts/src/backup.ts`（备份格式与校验）、`core/src/backup.ts`（编排：问每个参与者要自己那一份、拼包、导入时两段式）。`provider-local` 的两个身份各自申报 `data.*`，并各自实现导出/导入。
+
+## ADR-030：提供方随包，用本体自己那个 node 拉起
+
+**状态**：2026-10（0.2.0-dev）**已实现**（R02 剩余项）
+
+**问题**：ADR-021 让本体随包携带 `node.exe`，本体这一半才算解决。提供方却还在走 `spawn('pnpm', ['provider:local'], { shell: true })`，而且 `packages/provider-local` 根本没进 `dist-runtime`。结果是发布出去的东西**仍然要求目标机器先装好 pnpm 和 node**：双击 exe 之后本体起得来，日历与笔记却永远不接上，用户看到的正是「装了没运行」，而原因藏在发布包里 —— 排障的人还得先想到「这台机器没装 pnpm」这一层。
+
+**选择**：
+
+1. **`provider-local` 进产物。** `scripts/package-core.mjs` 的 `NEEDED` 加一条。它的 import 只有 `contracts` / `hostpaths` / `sqlite` 与 `node:` 内置模块（全都在清单里），测试文件照旧被 `EXCLUDE` 排除，所以整棵目录复制过去就能跑，不需要 bundler。
+
+2. **本体用 `process.execPath` 拉起提供方，不再绕 pnpm。** 本体进程**自己**就是那个随包的 `node.exe`，`process.execPath` 指向的正是它；用它去跑提供方的 `.ts` 入口，依赖就只剩「随包这一个 node」。省掉的不只是 pnpm —— 现在连 PATH 上有没有第二个 node 都不重要了，那本来就是个会静默走到别处去的坑。
+
+3. **入口写相对 `repoRoot` 的路径，两种环境共用同一张表。** 开发环境的 `repoRoot` 是仓库根，产物环境是 `dist-runtime/`；`package-core.mjs` 搬过去的是**同一批相对路径**，所以 `packages/provider-local/src/main.ts` 在两边都成立，不必按环境分叉 —— 分叉了就等于把这个 bug 复制成两份。
+
+4. **寻址键 → 入口的映射仍然归宿主**（ADR-016/017 不变）。只是这张表的语义从「pnpm 脚本名」变成「入口 + 参数」：日历与笔记指向同一个提供方入口，去重照旧按**目标路径**去重（日历与笔记由同一个进程提供，拉两次就是两个进程各报一次身份）。
+
+5. **客户端那条路（`ONE_LAUNCH_CLIENT`）在发布包里仍然走不通，如实记着。** 它指向 `scripts/client.mjs`，而 `scripts/` 不在产物里 —— 那是**开发环境专用**的入口（起 vite 或指 `dist/`）；发布包里不需要它，exe 自己就是客户端，壳也不会设这个变量，所以这条路上发布包根本不会被走到。真有人在发布环境里设了它，错误信息必须说清是缺 `scripts/`，而不是笼统的「拉不起来」。
+
+**备选**：
+
+- **把 `scripts/` 也打进产物**：多几十 KB，换一条发布包里语义不对的路「看起来能用」。宁可让它明确地不适用 —— 一个能被走到但行为不是用户以为那样的入口，比一个走不到并说清原因的入口更坏。
+- **给提供方单独打一个 exe**：发布包真正独立于 node 的最后一步，但要多一条构建链和多一个跨平台产物。随包携带 node 已经够用，先不引入。
+
+**协议影响**：无。契约、能力名与 `WIRE_VERSION` 一概不动 —— 这只是宿主怎么起子进程。
+
+**迁移影响**：`scripts/package-core.mjs` 的 `NEEDED` 多一条；`core/src/index.ts` 的 `LAUNCH_SCRIPTS` 改为 `LAUNCH_ENTRIES`（入口 + 参数），`launchScript` 改用 `process.execPath`。启动日志里报的不再是 pnpm 脚本名，而是入口路径。

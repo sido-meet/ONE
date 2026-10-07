@@ -52,23 +52,27 @@ export async function becomeTheCore(hooks: StartupHooks): Promise<boolean> {
 }
 
 /**
- * 拉起安装清单里的提供方，得到一串**脚本名**。
+ * 拉起安装清单里的提供方，得到一串**入口路径**。
  *
- * 按**脚本**去重，不是按寻址键：日历与笔记由同一个进程提供，拉两次就会有两个进程各
+ * 按**入口**去重，不是按寻址键：日历与笔记由同一个进程提供，拉两次就会有两个进程各
  * 报一次身份，名册里凭空多出两个参与者，调用时还会挑中先来的那个。
  * 一个寻址键只能有一个参与者在跑 —— 这是协议的前提（ADR-017）。
  *
  * 没装的提供方不在这儿出现：`installed` 之外的 id 说明用户压根没装那个源，
  * 拉它等于凭空多一个参与者。
+ *
+ * 这里去重的是**目标**，所以映射表的值是什么不影响这条规矩：ADR-030 之前值是 pnpm
+ * 脚本名，之后是相对 `repoRoot` 的入口路径（ADR-030）。曾经这里叫
+ * `providerScriptsOf`，名字在值改成路径之后就名不副实了。
  */
-export function providerScriptsOf(
+export function providerEntriesOf(
   installed: readonly string[],
-  launchScripts: Readonly<Record<string, string>>,
+  launchEntries: Readonly<Record<string, string>>,
 ): string[] {
-  const scripts = new Set<string>();
+  const entries = new Set<string>();
   for (const id of installed) {
-    const script = launchScripts[id];
-    if (script) scripts.add(script);
+    const entry = launchEntries[id];
+    if (entry) entries.add(entry);
   }
-  return [...scripts];
+  return [...entries];
 }
