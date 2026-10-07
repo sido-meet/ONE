@@ -22,12 +22,15 @@ const outDir = path.join(repoRoot, 'dist-runtime');
 const coreDir = path.join(repoRoot, 'core');
 const packagesDir = path.join(repoRoot, 'packages');
 
-/** 本体运行时会读源码的三个目录。少一个就起不来，因此清单里逐个记下来。 */
+/** 本体运行时会读源码的四个目录。少一个就起不来，因此清单里逐个记下来。 */
 const NEEDED = [
   { from: coreDir, to: 'core' },
   // contracts 与 mock-runtime 是本体 import 的（相对路径），不带走就找不到类型与端口。
   { from: path.join(packagesDir, 'contracts'), to: 'packages/contracts' },
   { from: path.join(packagesDir, 'mock-runtime'), to: 'packages/mock-runtime' },
+  // hostpaths 是本体与本地提供方共用的路径解析。少了它本体连启动都做不到 ——
+  // 它在 import 图上，离了这份清单就是一个第一次启动就报 ERR_MODULE_NOT_FOUND 的包。
+  { from: path.join(packagesDir, 'hostpaths'), to: 'packages/hostpaths' },
 ];
 
 /** 测试文件不带：发布产物里不需要 vitest，也省得让人以为本体依赖它。 */

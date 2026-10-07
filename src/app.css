@@ -371,6 +371,28 @@ textarea::placeholder {
 .error {
   font-size: 12px;
   color: #9e3c28;
+  /* 失败条上要放按钮，不换行的话按钮会挤到下一行去，看着像另一段东西。 */
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.retry {
+  padding: 2px 9px;
+  border: 1px solid currentColor;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.retry:hover {
+  background: rgba(158, 60, 40, 0.08);
+}
+.retry:focus-visible {
+  outline: 2px solid #688858;
+  outline-offset: 2px;
 }
 .plan-page {
   padding: 55px 7%;

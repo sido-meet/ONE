@@ -5,12 +5,15 @@
   import { client, link } from '../lib/client';
   import { pickActiveConversationId } from '../lib/active';
   import { pendingOf } from '../lib/proposal';
+  import { failureOf, reasonOf } from '../lib/send';
+  import type { SendFailure } from '../lib/send';
   import { shell } from '../lib/tauri';
   import ProposalCard from './ProposalCard.svelte';
 
   let snapshot = $state(client.getSnapshot());
   let input = $state('');
-  let error = $state('');
+  /** 送不出去的那句话。留着才能重试。 */
+  let failure = $state<SendFailure | undefined>(undefined);
   let coreState = $state(link.state());
   let inputElement = $state<HTMLInputElement | null>(null);
 
@@ -129,21 +132,36 @@
 
   async function send() {
     if (!activeId || !input.trim() || coreState !== 'ready') return;
-    const text = input;
-    input = '';
-    error = '';
+    const text = input.trim();
+    failure = undefined;
     try {
       await client.sendMessage(activeId, text);
+      // **送出去了才清框。** 送不出去时这句话留在原地，旁边就有重试 ——
+      // 清掉等于让用户在这个 380 宽的小条里重打一遍。
+      input = '';
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : '操作失败，请重试';
+      failure = failureOf(text, cause);
+    }
+  }
+
+  /** 重试就是原样再送一遍，不重新加工，也不替用户改写。 */
+  async function retry() {
+    if (!failure?.retryable) return;
+    const text = failure.text;
+    failure = undefined;
+    try {
+      await client.sendMessage(activeId ?? 'welcome', text);
+      input = '';
+    } catch (cause) {
+      failure = failureOf(text, cause);
     }
   }
 
   function stop() {
     if (!activeRun) return;
-    error = '';
+    failure = undefined;
     void client.cancelRun(activeRun.id).catch((cause: unknown) => {
-      error = cause instanceof Error ? cause.message : '停止失败，请重试';
+      failure = failureOf('', cause);
     });
   }
 </script>
@@ -219,12 +237,19 @@
       bind:this={inputElement}
       bind:value={input}
       maxlength="8000"
-      placeholder={error ||
-        (coreState === 'ready' ? '对 ONE 说点什么…' : '本体未连接')}
+      placeholder={failure
+        ? reasonOf(failure)
+        : coreState === 'ready'
+          ? '对 ONE 说点什么…'
+          : '本体未连接'}
       disabled={coreState !== 'ready'}
       autocomplete="off"
       autocapitalize="off"
       spellcheck="false"
+      oninput={() => {
+        // 用户改了这句话，针对旧句子的失败提示就不再成立。
+        if (failure && input.trim() !== failure.text) failure = undefined;
+      }}
       onkeydown={(event) => {
         // 中文输入法确认候选词时也会给 Enter，不能当成发送。
         if (event.key === 'Enter' && !event.isComposing) {
@@ -243,7 +268,20 @@
       >
     {/if}
   </form>
-  {#if error}<p class="error" role="alert">{error}</p>{/if}
+  {#if failure}
+    <!-- 失败条要说清能做什么。那句话还在上面的框里 —— 清掉等于让用户重打。 -->
+    <p class="error" role="alert">
+      <span>{reasonOf(failure)}</span>
+      {#if failure.retryable}
+        <button type="button" class="retry" onclick={() => void retry()}
+          >重试</button
+        >
+      {/if}
+      <button type="button" class="retry" onclick={() => (failure = undefined)}
+        >知道了</button
+      >
+    </p>
+  {/if}
 </div>
 
 <style>
@@ -390,8 +428,34 @@
   }
   .error {
     margin: 0;
+    padding: 5px 10px;
+    border: 1px solid rgba(138, 59, 47, 0.35);
+    border-radius: 10px;
+    background: #fff;
     font-size: 12px;
     color: #8a3b2f;
+    /* 要放按钮，不换行的话按钮会掉到下一行，看着像另一段东西。 */
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+  .retry {
+    padding: 2px 9px;
+    border: 1px solid currentColor;
+    border-radius: 7px;
+    background: transparent;
+    color: inherit;
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .retry:hover {
+    background: rgba(138, 59, 47, 0.08);
+  }
+  .retry:focus-visible {
+    outline: 2px solid #688858;
+    outline-offset: 2px;
   }
   @keyframes blink {
     0%,

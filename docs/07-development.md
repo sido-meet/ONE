@@ -51,7 +51,33 @@ desktop:build 当前只构建可执行程序，不生成安装包。Tauri 标识
 
 启动本体有两种方式（ADR-021）：仓库里跑源码（开发用，系统 `node`），或用 `pnpm core:package` 产出的随包运行时（发布用，自带 `node.exe`，机器上没装 node 也能跑）。壳**优先找产物**，找不到才回退源码；两处都没有时它会停下来说清找过哪儿，而不是表现成「本体没接上」。
 
-源码路径靠 `ONE_REPO_ROOT`（或从编译期的 `CARGO_MANIFEST_DIR` 向上找到 `core/src/index.ts`）定位。0.1 用 `ONE_INSTALLED` 环境变量代替安装器，默认 `pet`。客户端种类有两种传法：已构建的 exe 用 `--client=pet`，`tauri dev` 用 `ONE_CLIENT=pet`（Tauri CLI 会把 `--client=` 错位传给 cargo）。`ONE_CORE_RUNTIME` 可以显式指定产物目录，联调时用得上。
+源码路径靠 `ONE_REPO_ROOT`（或从编译期的 `CARGO_MANIFEST_DIR` 向上找到 `core/src/index.ts`）定位。客户端种类有两种传法：已构建的 exe 用 `--client=pet`，`tauri dev` 用 `ONE_CLIENT=pet`（Tauri CLI 会把 `--client=` 错位传给 cargo）。`ONE_CORE_RUNTIME` 可以显式指定产物目录，联调时用得上。
+
+## 双击就能用：不需要先开终端
+
+`one-desktop.exe` 自己会拉起本体，**本体再把已安装的提供方与可视客户端拉起来**。因此正常使用不需要任何终端，也不需要设环境变量。
+
+装一次提供方（只需一次，之后双击即可）：
+
+```powershell
+node core\src\index.ts install local.calendar local.notes   # 或 pnpm core:cli install …
+```
+
+清单落在用户数据目录：`%APPDATA%\ONE\data\installed.json`（Linux/macOS 是 `~/.local/share/ONE/data`），可用 `ONE_DATA_DIR` 改。查当前清单：`pnpm core:cli installed`。卸掉同理 `uninstall`。
+
+**本体自己也可以当入口**，`ONE_LAUNCH_CLIENT=pet`（或 `desktop`）让它起来之后顺手把可视客户端带出来。客户端自己不会设这个变量，所以不会互相拉起、不会递归。已经在场的同类客户端不重复拉 —— 一个寻址键只能有一个参与者在跑（ADR-017）。
+
+三件曾经把用户逼进终端的事，都已经不在了：
+
+| 曾经                                    | 现在                                                                  |
+| --------------------------------------- | --------------------------------------------------------------------- |
+| 双击启动时没有环境变量 → 日历压根没装上 | 清单落盘，本体启动时读它并自动拉起提供方                              |
+| 拉起提供方会闪一个黑色控制台窗口        | `spawn` 带 `windowsHide: true` —— Windows 上「后台」不只是 `detached` |
+| 本体与提供方各按自己的位置算「根」      | 共用 `packages/hostpaths` 的 `dataDir()`，同一个应用只有一处数据      |
+
+`ONE_INSTALLED` 仍在，但降级成**给验收脚本用的显式覆盖**（优先级：环境变量 > 清单文件 > 只装宠物）。
+
+数据目录从仓库内的 `.one/data` 挪到了用户数据目录。旧的开发期验收数据留在 `.one/data-legacy`，没有迁移代码 —— 那是验收里的测试垃圾，不是用户数据。
 
 ```powershell
 pnpm core            # 只启动 ONE 本体

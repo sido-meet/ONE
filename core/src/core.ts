@@ -28,6 +28,7 @@ import {
   settledResolution,
 } from '../../packages/contracts/src/index.ts';
 import { WIRE_VERSION } from '../../packages/contracts/src/wire.ts';
+import { isProviderId } from '../../packages/contracts/src/wire.ts';
 import { PAGE_READ_CAPABILITY } from '../../packages/contracts/src/page.ts';
 
 /**
@@ -67,6 +68,14 @@ export interface CoreOptions {
   launchClient?: (provider: ProviderId) => Promise<void> | void;
   /** 领域能力提供方；未给的种类一律按「没安装」处理。 */
   domains?: DomainPorts;
+  /**
+   * 安装清单变了就告诉宿主，由宿主落盘。
+   *
+   * 本体**不该知道**清单写在哪个文件、也没有那个必要 —— 它持有的是「装了什么」
+   * 这个决定，「记在哪」是宿主与运行环境的事。不接这个回调也不会坏，只是清单
+   * 停在进程启动时的样子。
+   */
+  onInstalledChange?: (ids: ProviderId[]) => void;
 }
 
 interface Session {
@@ -88,6 +97,45 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
   const installed = new Set<ProviderId>(options.installed ?? ['pet']);
   const domains = options.domains ?? {};
   let revision = 0;
+
+  /**
+   * 装上/卸下，并**告诉宿主清单变了**。
+   *
+   * 本体不负责把清单写到磁盘 —— 它不该知道文件在哪、也没有那个必要。宿主把
+   * `onInstalledChange` 接上，由它落盘。这条分工是「本体持有安装清单」的形状：
+   * 本体持有**决定**，宿主持有**记录**。
+   *
+   * 改了就得立刻广播名册：界面上「未安装」的入口与「装了没运行」的说法是两回事，
+   * 改完不广播，界面会一直停在旧的那一边。
+   */
+  const markInstalled = (provider: ProviderId) => {
+    if (installed.has(provider)) {
+      // **已经在装，但仍然要落盘。** 进程里的清单和磁盘上的清单是两回事：
+      // 环境变量可以临时把它们都装上，而文件里一个字都没有 —— 这时候跳过写入，
+      // 下一次不带环境变量的启动就又回到了「什么都没装」。
+      options.onInstalledChange?.([...installed]);
+      return;
+    }
+    installed.add(provider);
+    options.onInstalledChange?.([...installed]);
+    pushRoster();
+  };
+  const unmarkInstalled = (provider: ProviderId) => {
+    // `pet` 是本体自己的脸，不是插件：卸掉它等于界面都不出现。
+    if (!installed.has(provider) || provider === 'pet') return;
+    installed.delete(provider);
+    options.onInstalledChange?.([...installed]);
+    pushRoster();
+  };
+
+  /** 只把**认识的**寻址键挑出来。不认识的不在这里报错，交给调用方比数量。 */
+  const providerIdList = (raw: unknown): ProviderId[] => {
+    if (!Array.isArray(raw)) return [];
+    return raw.filter(
+      (item): item is ProviderId =>
+        typeof item === 'string' && isProviderId(item),
+    );
+  };
 
   /**
    * 名册是「参与者」而不是「客户端」：呈现形式与领域提供方都能查得到。
@@ -227,6 +275,26 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
       runtime.sendMessage(args[0] as string, args[1] as string),
     cancelRun: (...args) => runtime.cancelRun(args[0] as string),
     proposalResolve: (...args) => resolveProposal(args),
+    /**
+     * 装上/卸下提供方。这是 0.1 的「安装器」：清单落盘由宿主做，本体只改决定。
+     *
+     * 认不出来的寻址键直接报 VALIDATION，不静默丢掉 —— 敲错一个 id 却显示
+     * 「装好了」，用户等会儿打开日历发现还是没有，比报错难查得多。
+     */
+    installProviders: async (...args) => {
+      const ids = providerIdList(args[0]);
+      if (ids.length !== (args[0] as unknown[])?.length)
+        throw new ClientError('VALIDATION', '有不认识的寻址键，没装成');
+      ids.forEach((id) => markInstalled(id));
+      return { installed: [...installed] };
+    },
+    uninstallProviders: async (...args) => {
+      const ids = providerIdList(args[0]);
+      if (ids.length !== (args[0] as unknown[])?.length)
+        throw new ClientError('VALIDATION', '有不认识的寻址键，没卸成');
+      ids.forEach((id) => unmarkInstalled(id));
+      return { installed: [...installed] };
+    },
     /**
      * 列出提议。界面靠快照里的 `proposals` 就够了，这条是给命令行与排障用的 ——
      * 它读的是**同一份**状态，不是另一处拷贝。
@@ -708,10 +776,8 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
     roster,
     invoke,
     installed: () => [...installed],
-    markInstalled(provider: ProviderId) {
-      installed.add(provider);
-      pushRoster();
-    },
+    markInstalled,
+    unmarkInstalled,
     snapshot: () => ({ revision, snapshot: runtime.getSnapshot() }),
   };
 }

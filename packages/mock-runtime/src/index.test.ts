@@ -138,4 +138,41 @@ describe('一句话的三种结果', () => {
       expect(proposals).toHaveLength(0);
     }
   });
+
+  /**
+   * 故障注入（0.1 验收脚本那条「注入模拟超时/断线」）。
+   *
+   * 钉的是**一次性**：不一次性的话，后面每一次发送都失败，界面上那个「重试」
+   * 按钮就永远成功不了 —— 而那正是要验的东西。
+   */
+  it('注入的故障只作用一次，之后恢复正常', async () => {
+    vi.useFakeTimers();
+    client = createMockClient({ tickMs: 1 });
+    process.env['ONE_FAULT'] = 'timeout';
+    await expect(
+      client.sendMessage('welcome', '这句话会失败'),
+    ).rejects.toMatchObject({
+      code: 'TIMEOUT',
+    });
+    // 不产生用户消息：消息提交发生在故障之后，失败的那次不该留下痕迹。
+    expect(
+      client.getSnapshot().events.filter((e) => e.type === 'message.created'),
+    ).toHaveLength(0);
+
+    await client.sendMessage('welcome', '这句应该成功');
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(
+      client.getSnapshot().events.filter((e) => e.type === 'message.created'),
+    ).toHaveLength(2);
+  });
+
+  it('认不出的故障名当没写，不猜', async () => {
+    vi.useFakeTimers();
+    client = createMockClient({ tickMs: 1 });
+    process.env['ONE_FAULT'] = '宇宙射线';
+    await expect(
+      client.sendMessage('welcome', '照常发送'),
+    ).resolves.toBeTruthy();
+    await vi.advanceTimersByTimeAsync(2000);
+  });
 });

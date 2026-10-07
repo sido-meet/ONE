@@ -1,9 +1,13 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import type { AgentId } from '../../packages/contracts/src';
   import { client, link } from '../lib/client';
+  import { createDraftBook } from '../lib/drafts';
+  import { shouldStickToBottom, stickToBottom } from '../lib/follow';
   import { proposalsByMessage } from '../lib/proposal';
+  import { failureOf, reasonOf } from '../lib/send';
+  import type { SendFailure } from '../lib/send';
   import { shell, listenBeforeQuit } from '../lib/tauri';
   import ProposalCard from './ProposalCard.svelte';
 
@@ -12,8 +16,22 @@
   let selectedId = $state('welcome');
   let page = $state<'chat' | 'plan'>('chat');
   let input = $state('');
-  let error = $state('');
   let coreState = $state(link.state());
+  /** 送不出去的那句话。留着就能重试，清掉等于让用户重打一遍。 */
+  let failure = $state<SendFailure | undefined>(undefined);
+
+  /**
+   * 每对话各留一份草稿（P06）。切走时存、切回时取，键是**对话**不是窗口 ——
+   * 一个全局草稿只够防「刷新」，防不了「换到别的对话再换回来」。
+   */
+  const drafts = createDraftBook();
+  const goto = (id: string) => {
+    drafts.save(selectedId, input);
+    selectedId = id;
+    page = 'chat';
+    input = drafts.take(id);
+    failure = undefined;
+  };
 
   /** 按 messageId 分组一次，渲染时直接查 —— 别在模板里 filter 整个数组。 */
   const proposalsOf = $derived.by(() => {
@@ -78,30 +96,86 @@
     };
   });
 
-  async function act(action: () => Promise<unknown>) {
-    error = '';
+  async function send() {
+    const text = input.trim();
+    if (!text) return;
+    failure = undefined;
     try {
-      await action();
+      await client.sendMessage(selectedId, text);
+      // **送出去了才清框。** 失败时这句话得留在原地，旁边就有重试。
+      input = '';
+      drafts.clear(selectedId);
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : '操作失败，请重试';
+      failure = failureOf(text, cause);
     }
   }
 
-  async function send() {
-    if (!input.trim()) return;
-    await act(async () => {
-      await client.sendMessage(selectedId, input);
+  /** 重试就是原样再送一遍那句话 —— 不重新加工，也不替用户改写。 */
+  async function retry() {
+    if (!failure?.retryable) return;
+    const text = failure.text;
+    failure = undefined;
+    try {
+      await client.sendMessage(selectedId, text);
       input = '';
-    });
+      drafts.clear(selectedId);
+    } catch (cause) {
+      failure = failureOf(text, cause);
+    }
+  }
+
+  async function act(action: () => Promise<unknown>) {
+    try {
+      await action();
+    } catch (cause) {
+      failure = failureOf('', cause);
+    }
   }
 
   async function create() {
-    await act(async () => {
-      selectedId = (await client.createConversation()).id;
-      page = 'chat';
+    try {
+      drafts.save(selectedId, input);
+      const made = await client.createConversation();
       input = '';
-    });
+      selectedId = made.id;
+      page = 'chat';
+      failure = undefined;
+    } catch (cause) {
+      failure = failureOf('', cause);
+    }
   }
+
+  /**
+   * **只有用户本来就在底部时才跟着新内容往下滚**（P06）。
+   *
+   * 他往上翻是为了读更早的一段，回复到达时把他拽回底部，等于当着他的面把字抽走，
+   * 而且他不知道为什么。所以判断的是「发送前他是不是贴着底」，不是「内容是不是
+   * 变长了」。
+   */
+  let scroller = $state<HTMLDivElement | null>(null);
+  let sticking = $state(true);
+  const onScroll = () => {
+    if (!scroller) return;
+    sticking = shouldStickToBottom({
+      scrollTop: scroller.scrollTop,
+      scrollHeight: scroller.scrollHeight,
+      clientHeight: scroller.clientHeight,
+    });
+  };
+
+  $effect(() => {
+    // 依赖这两条：消息条数与正在增长的草稿。读出来只是为了让这条 effect 在
+    // 「内容变了」时重跑，值本身用不上。
+    const messages = events.length;
+    const runId = activeRun?.id;
+    const live = runId ? snapshot.drafts[runId] : '';
+    void messages;
+    void live;
+    if (!sticking || !scroller) return;
+    void tick().then(() => {
+      if (scroller) scroller.scrollTop = stickToBottom(scroller);
+    });
+  });
 </script>
 
 <div class="shell">
@@ -125,12 +199,8 @@
       {#each snapshot.conversations as item (item.id)}
         <button
           class:chosen={selectedId === item.id && page === 'chat'}
-          onclick={() => {
-            selectedId = item.id;
-            page = 'chat';
-            input = '';
-            error = '';
-          }}><span class="conversation-dot"></span>{item.title}</button
+          onclick={() => goto(item.id)}
+          ><span class="conversation-dot"></span>{item.title}</button
         >
       {/each}
     </nav>
@@ -178,7 +248,12 @@
           </select>
         </label>
       </section>
-      <div class="chat-body" aria-label="聊天记录">
+      <div
+        class="chat-body"
+        bind:this={scroller}
+        onscroll={onScroll}
+        aria-label="聊天记录"
+      >
         {#if coreState !== 'ready'}
           <div class="welcome">
             <p class="eyebrow">ONE 本体</p>
@@ -247,7 +322,24 @@
         {/if}
       </div>
       <div class="composer-area">
-        {#if error}<p class="error" role="alert">{error}</p>{/if}
+        {#if failure}
+          <!-- 失败条要说清发生了什么、能做什么，并且**那句话还在框里**：
+               清掉等于让用户重打一遍，而重打的那遍往往还不一样。
+               所以这里只有一个「重试」和一个「知道了」，没有「清空」。 -->
+          <p class="error" role="alert">
+            <span>{reasonOf(failure)}</span>
+            {#if failure.retryable}
+              <button type="button" class="retry" onclick={() => void retry()}
+                >重试</button
+              >
+            {/if}
+            <button
+              type="button"
+              class="retry"
+              onclick={() => (failure = undefined)}>知道了</button
+            >
+          </p>
+        {/if}
         <form
           onsubmit={(event) => {
             event.preventDefault();
@@ -262,6 +354,10 @@
             rows="2"
             maxlength="8000"
             disabled={coreState !== 'ready'}
+            oninput={() => {
+              // 用户改了这句话，上面那条针对旧句子的失败提示就不再成立。
+              if (failure && input.trim() !== failure.text) failure = undefined;
+            }}
             onkeydown={(event) => {
               if (
                 event.key === 'Enter' &&

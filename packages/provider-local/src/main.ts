@@ -7,6 +7,7 @@ import { WIRE_VERSION } from '../../contracts/src/wire.ts';
 import type { ClientMessage, CoreMessage } from '../../contracts/src/wire.ts';
 import { PAGE_ENTRY, pageRoot, readPageResource } from './pages.ts';
 import { createLocalProvider } from './provider.ts';
+import { dataDir as resolveDataDir } from '../../hostpaths/src/index.ts';
 
 /**
  * 本地日历/笔记提供方的进程入口（ADR-016）。
@@ -23,8 +24,14 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '../../..');
 const DEFAULT_PIPE = '\\\\.\\pipe\\one-core';
 
-/** 数据目录：默认在用户数据下，不污染仓库。 */
-const dataDir = process.env.ONE_DATA_DIR ?? path.join(repoRoot, '.one', 'data');
+/**
+ * 数据目录：与本体**同一处**（`packages/hostpaths`，两边共用一份）。
+ *
+ * 以前这里按「自己所在的仓库」算，本体按「自己所在的位置」算，两边分家 ——
+ * 同一个应用的日历在一个目录、安装清单在另一个，而从开始菜单双击启动的那个
+ * 本体哪个都读不到。共用一份解析是唯一的解法：少写一份，就少漂移一次。
+ */
+const dataDir = resolveDataDir();
 
 const KINDS = [
   { id: 'local.calendar', kind: 'calendar' as const },

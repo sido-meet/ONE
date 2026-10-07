@@ -1,4 +1,5 @@
 import { ClientError } from '../../contracts/src/index.ts';
+import type { ErrorCode } from '../../contracts/src/index.ts';
 import { createMemoryProviders } from './domain.ts';
 import { parseSchedule } from './schedule.ts';
 import { parseNote } from './note.ts';
@@ -69,6 +70,38 @@ function draftOf(input: string, lastReply?: string): DraftOutcome {
   if (schedule.near) return { kind: 'incomplete', hint: schedule.reason };
   if (note.near) return { kind: 'incomplete', hint: note.reason };
   return { kind: 'chitchat' };
+}
+
+/** 环境变量里能写出来的故障名。写错的名字当没写，不猜。 */
+const FAULTS: Record<string, ErrorCode> = {
+  timeout: 'TIMEOUT',
+  offline: 'UNAVAILABLE',
+  busy: 'BUSY',
+  validation: 'VALIDATION',
+  permission: 'PERMISSION_DENIED',
+};
+
+/**
+ * **故障注入**（0.1 验收脚本里那条「注入模拟超时/断线」）。
+ *
+ * 由 `ONE_FAULT=timeout|offline|busy|validation|permission` 开启，**只作用一次**：
+ * 下一次 `sendMessage` 抛出对应的错误，之后恢复正常。没有它，「失败能重试」只能
+ * 靠杀本体验 —— 而本体七八百毫秒就重启回来了，窗口往往还没来得及报错就又连上，
+ * 「那句话还在框里」与「重试按钮」这两段根本验不到。
+ *
+ * 放在参数校验**之后**：要让「这句话 ONE 收不了」原样成立，就不能先被别的检查
+ * 拦下，那验到的就成了另一件事。
+ *
+ * 它只活在模拟运行时里。真模型接进来之后这条整体退役 —— 那时超时是真实发生的，
+ * 不需要注入。
+ */
+function takeInjectedFault(): ClientError | undefined {
+  const raw = (process.env['ONE_FAULT'] ?? '').trim().toLowerCase();
+  const code = FAULTS[raw];
+  if (!code) return undefined;
+  // 一次性：读完就摘掉，不然后面每一次发送都失败，重试按钮永远成功不了。
+  delete process.env['ONE_FAULT'];
+  return new ClientError(code, '注入的模拟故障');
 }
 
 export function createMockClient(
@@ -242,6 +275,10 @@ export function createMockClient(
       const input = text.trim();
       if (!input || input.length > 8000)
         throw new ClientError('VALIDATION', '请输入 1–8000 字的消息');
+      // 故障注入排在参数校验之后：要让「这句话 ONE 收不了」原样成立，就不能先被
+      // 别的检查拦下。
+      const injected = takeInjectedFault();
+      if (injected) throw injected;
       if (
         state.runs.some(
           (run) =>

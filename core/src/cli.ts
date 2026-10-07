@@ -154,6 +154,19 @@ export async function runCli(argv: string[], pipe?: string) {
       args: [second ?? 'welcome'],
     }));
     process.stdout.write(`${JSON.stringify(reply)}\n`);
+  } else if (first === 'install' || first === 'uninstall') {
+    // 0.1 的「安装器」。装一次之后，双击 ONE 就会自己把提供方拉起来 ——
+    // 不再要求用户先开一个终端把 ONE_INSTALLED 敲进去才看得到日历。
+    const reply = await ask((id) => ({
+      t: 'call',
+      id,
+      cmd: first === 'install' ? 'installProviders' : 'uninstallProviders',
+      args: [argv.slice(1)],
+    }));
+    process.stdout.write(`${JSON.stringify(reply)}\n`);
+  } else if (first === 'installed') {
+    const reply = await ask((id) => ({ t: 'clients.list', id }));
+    process.stdout.write(`${JSON.stringify(reply)}\n`);
   } else if (first === 'launch') {
     const reply = await ask((id) => ({
       t: 'clients.launch',
