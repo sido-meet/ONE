@@ -620,7 +620,7 @@ export type ClientKind = 'pet' | 'desktop' | 'cli';
 
 ## ADR-031：模型接入的边界 —— 流式端口、代理、错误分类、凭据与用量
 
-**状态**：2026-10（0.3.0-dev）**已定，实现待做**
+**状态**：2026-10（0.3.0-dev）**已定，实现中**（流式端口、HTTP 客户端、SSE 分帧、Anthropic 适配器已落地；装配与实机验收待做）
 
 **问题**：0.2 的 `ReplyAgent` 只有一个形状：`reply(prompt) → Promise<string>`，模拟 Agent 整句返回。换真实模型立刻不够用四件事：① **流式**——用户看着字一个个出来，与「先卡十几秒再整段出现」是完全不同的两种产品；② **取消**——点「停止回复」必须真的打断传输，而不是等它自己跑完再把结果丢掉；③ **错误**——401 / 403 / 429 / 529 / 超时 / 断网，用户看到的说法该不同，可重试的判断也该不同；④ **用量**——真实 token 数是提供方给的，不是我按字符数算的。
 
@@ -640,15 +640,27 @@ export type ClientKind = 'pet' | 'desktop' | 'cli';
 
 7. **HTTP 客户端自己实现，不用 `fetch`；走本机系统代理。** 这一条是写 ADR 时实测撞出来的，不是预想到的：同一个地址、同一个编造的 key，两条路给出两个**完全不同**的结果 —— Node 内置 `fetch` 直连得到 `HTTP 403 {"type":"forbidden","message":"Request not allowed"}`（发生在**认证之前**），而经本机代理 `127.0.0.1:7897` 得到 `HTTP 401 {"type":"authentication_error"}`（这才是 key 不对）。原因是 Windows 的系统代理在**注册表**里（`ProxyEnable`/`ProxyServer`），而 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量是空的：浏览器读系统代理所以能上外网，Node 的 `fetch` 两样都不读，于是直连并被按地区拒掉；Node 24 才有的 `NODE_USE_ENV_PROXY` 这台机器的 22.23.1 也没有。所以：用 `node:http` 发 `CONNECT` 建隧道、`node:tls` 接上去当普通 HTTPS 用，零第三方依赖，SSE 分帧/超时/取消全部自己可控（这三样恰好是 `fetch` 给不了或不好控的）；代理地址由**壳**读注册表后经环境变量传给本体，注册表留在 Windows 宿主边界；系统代理没开就直连，行为与今天一致。
 
+8. **端口补上 `history`（后补，实现时才发现缺）。** 第 1 条只把「一句话」换成了「一段话」，仍然只给「这次提问 + 上一条回复」。拿真模型一试就知道这不够：用户问「那明天呢」，模型手上只有「那明天呢」四个字，**它从来没听过**「明天下午三点面试」那一句。那种失败在界面上和「模型笨」长得一模一样，排查半天会得出「AI 不行」这个错误结论 —— 而真相是**缺输入**。`history` 是**可选**的：模拟 Agent 与契约测试里的假 Agent 不接也不坏。历史读的是**同一份事件**（ADR-028），不是另存一份；这次提问本身不在里面，因为运行时是「先答话、再落历史」，它此刻还没写进去。
+
 **备选**：
 
 - **用 `undici` 的 `ProxyAgent`**：少写一点隧道代码，但为了一个代理引入一个第三方依赖，与本项目「本体零第三方依赖」的前提冲突（ADR-021）。
 - **要求用户自己设 `HTTPS_PROXY` 环境变量**：文档一句话就能写。但 Windows 用户开代理的习惯是点一下「使用代理服务器」开关，环境变量仍然是空的 —— 让用户为一个应用额外配一次环境变量，是在要求用户替应用做集成。
 
-**证据**：官方流式协议取自 `platform.claude.com` 文档 —— 事件流为 `message_start` → 每个内容块 `content_block_start` / 多个 `content_block_delta` / `content_block_stop` → 一个或多个 `message_delta` → `message_stop`，其间可穿插任意 `ping`，也可能出现 `error` 事件（如 `overloaded_error`，非流式时对应 HTTP 529）。代理那两条是本机实跑出来的（`node:http` CONNECT 隧道 + TLS 握手 + 真实 POST），不是推断。
+**证据**：官方流式协议取自两处，都不是凭记忆：
+
+- 文档站 `platform.claude.com` 在本机被**按地区挡掉**（返回的是「App unavailable in region」页，不是文档），所以改取官方 SDK 源码：`anthropics/anthropic-sdk-typescript` 的 `src/resources/messages/messages.ts`（事件与字段类型）、`src/lib/MessageStream.ts`（`accumulateEvent` 的累积规则）、`src/core/streaming.ts`（SSE 解析与 `ping`/`error` 处理）、`src/client.ts`（`anthropic-version: 2023-06-01`）。取法是本机代理 + `CONNECT` 隧道，与第 7 条同一套机制。
+- 关键三条：① `message_delta.usage.output_tokens` 是**累计**值 —— 官方 SDK 在该处注释原话是「cumulative whole-message totals … so overwrite when present and never add」；② 同角色连续出现是**支持**的，原话「Consecutive user or assistant turns in your request will be combined into a single turn」，所以客户端不合并（合并就得猜哪句归哪边，猜错等于改写用户说过的话）；③ `thinking_delta`（模型中间推理）与 `input_json_delta`（工具参数）各有各的字段，与 `text_delta` 互不重叠 —— 这既是「只收 `text_delta`」能挡住模型隐藏推理的原因，也正合项目「不保存模型隐藏推理」那条约束。
+- 代理那两条 403/401 是本机实跑出来的（`node:http` CONNECT 隧道 + TLS 握手 + 真实 POST），不是推断。
 
 一条纪律：**验收要记走的是哪条路**。直连 403 与代理 401 只差一个字，含义完全相反 —— 把前者写成「网络不通」，就会把一个代理配置问题记成「服务不可用」。
 
 **协议影响**：无。`ReplyAgent` 是本体内部的 TS 端口，不是线协议，旧客户端不感知，不升 `WIRE_VERSION`。
 
-**迁移影响**：待实现（HTTP 客户端、Anthropic 适配器、壳读系统代理）。模拟 Agent 随端口形状一起改形状，模拟模式继续可用。换一家厂商时本 ADR 第 1、2、3、5 条不用改，只需替换适配器与错误码映射表。
+**迁移影响**：已实现的部分 —— 流式端口与 `AbortSignal` 取消（`2c10875`）、走代理的 HTTPS 客户端、SSE 分帧、Anthropic 适配器（`core/src/net/`、`core/src/agents/`）。模拟 Agent 随端口形状一起改形状，模拟模式继续可用。待做 —— 本体装配（换 Agent）、壳读注册表传代理、界面上「是真是模拟」改由本体下发。实机验收（真实 usage、取消是否真断传输）待凭据到位。换一家厂商时本 ADR 第 1、2、3、5 条不用改，只需替换适配器与错误码映射表。
+
+**实现中撞出来的三件事**（都不是预想到的，记下来是因为它们都会「安静地出错」）：
+
+1. **只调 `iterator.return()` 掐不断传输。** 生成器挂在一次 `await` 上时，return 请求排在 pending 的 `next` 后面，那一次等待照走、那一段照交 —— 界面早就停了，对面还在收 token。取消的真正通道是 `AbortSignal`，配套一个可被它打断的等待；`return()` 仍然要调，但它是善后（跑 `finally`、关 socket），不是掐断。判据「新测试必须在坏代码上验过红」在这里直接逼出了这个修正。
+2. **缓冲末尾那个孤零零的 `\r` 不能当行尾。** 它多半是 `\r\n` 的前半截，`\n` 还在下一段。抢先切一刀的话那个 `\n` 就成了下一行的开头 —— 空行即事件边界，于是**每个事件后面凭空多出一个空事件**。自己写的 SSE 一律用 `\n`，而中间那层代理经常改写成 `\r\n`：一个只在纯 `\n` 下测过的实现，上机就散架。
+3. **分块传输的块体是字节，从头到尾不许碰文本编解码。** 曾经用 `TextDecoder('latin1')` 攒字符串、切完再 `TextEncoder` 编回去：那一来一回对 ASCII 无损，对**任何 ≥0x80 的字节却是错的**（latin1 解出码点 128–255，再编成两字节 UTF-8）。中文于是整片变成乱码，而状态码 200、**一条错误日志都没有**。

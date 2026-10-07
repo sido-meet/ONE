@@ -181,6 +181,28 @@ export function createConversationRuntime(
     return undefined;
   };
 
+  /**
+   * 这段对话**在这次提问之前**说过的话（ADR-031）。
+   *
+   * 真模型离了它就是聋的：用户问「我刚才说的那个三点的会」，而模型只看得见这一句和
+   * 上一条回复，于是只能瞎猜。那种失败在界面上和「模型笨」长得一模一样，排查半天
+   * 结论是「AI 不行」。
+   *
+   * 读的仍然是**同一份事件**，不是另存一份历史 —— 存两份必然漂移（ADR-028）。
+   * 这次提问本身不在里面：上面是「先答话、再落历史」，它此刻还没写进去。
+   */
+  const historyOf = (conversationId: string) =>
+    state.events
+      .filter(
+        (event): event is Extract<typeof event, { type: 'message.created' }> =>
+          event.type === 'message.created' &&
+          event.conversationId === conversationId,
+      )
+      .map((event) => ({
+        role: event.message.role,
+        content: event.message.content,
+      }));
+
   const makeProposal = (
     conversationId: string,
     messageId: string,
@@ -328,6 +350,7 @@ export function createConversationRuntime(
       const answer = await agentById(conversation.agentId).reply({
         text: input,
         lastReply: lastAssistantReply(conversationId),
+        history: historyOf(conversationId),
         signal: controller.signal,
       });
 

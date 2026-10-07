@@ -149,6 +149,11 @@ export interface ConversationRuntime {
  * `signal` 是**取消的唯一可靠通道**（ADR-031）。别指望调用方拿到生成器再 `.return()`
  * 就够了：生成器正挂在一次 `await` 上时，return 请求排在 pending 的 `next` 后面，
  * 那一次 `yield` 一定会先吐出来 —— 想「点了停止就立刻不交内容」，得靠它醒来。
+ *
+ * **`history` 是后补的，模拟 Agent 用不上，真模型离了它就不能用**（ADR-031）：
+ * 只给「这句话 + 上一条回复」的话，用户问「我刚才说的那个」模型压根没听过那句话。
+ * 那不是能力弱，是**缺输入** —— 而缺输入的失败长得和「模型笨」一模一样。
+ * 它是**可选**的：现有实现（模拟 Agent、契约测试里的假 Agent）不接也不坏。
  */
 export interface ReplyAgent {
   readonly id: AgentId;
@@ -157,6 +162,13 @@ export interface ReplyAgent {
     text: string;
     /** 上一条 assistant 回复。笔记的「把刚才那段记下来」要靠它。 */
     lastReply: string | undefined;
+    /**
+     * 这段对话**在这次提问之前**说过的话，按顺序。含用户与助手两侧。
+     *
+     * 这次提问本身不在里面：运行时是「先答话、再落历史」（ADR-028），所以
+     * Agent 答话时它还没落库。`text` 就是它。
+     */
+    history?: readonly { role: 'user' | 'assistant'; content: string }[];
     /** 用户点了「停止回复」。实现要在**每段之间**看它，并保证收到后一个字都不再交。 */
     signal?: AbortSignal;
   }): Promise<{
