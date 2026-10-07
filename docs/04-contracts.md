@@ -200,4 +200,6 @@ SQLite 表：workspaces、conversations、runs、agent_bindings、conversation_e
 - v1 导出 JSON 带 schemaVersion 和相对附件路径；导入校验大小、路径穿越和未知字段。
 - 自动摘要不覆盖原消息；记录生成范围与来源 seq。用户可纠正摘要。
 
-这里是数据设计，尚未创建数据库或迁移脚本，R01 开发时需要从实际查询和恢复用例形成可执行 schema。
+**已实现（R01，ADR-027）**：上面十张表里的五张已经在 `<数据目录>/local.db` 里 —— `notes`、`calendar_events`、`audit_entries`、`command_receipts`、`schema_migrations`。库用 `node:sqlite` 开，**不加任何依赖**；`journal_mode=WAL` + `synchronous=FULL` + `foreign_keys=ON` + `busy_timeout=5000`。两条约束已经落成声明式的：版本守卫写进 `UPDATE … WHERE version = ?`，幂等回执的**唯一约束在主键上** `(workspace_id, idempotency_key)`。0.1 的两个 JSON 文件由迁移 v2 导入，**原文件一个字节都不动**，成功后改名成 `.migrated`；坏文件让整次迁移失败而不是静默导空。
+
+**没实现的**：`workspaces`、`conversations`、`runs`、`agent_bindings`、`conversation_events`、`artifacts` 六张表**还没建**，它们归 R03（会话运行时持久化）。所以「同事务写投影与事件」这条目前只有日历与笔记这一半，事件侧要等 R03。`dataDir()` 的优先级是 `ONE_DATA_DIR` > `%APPDATA%\ONE\data`。

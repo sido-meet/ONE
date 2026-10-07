@@ -7,6 +7,8 @@ import { PAGE_READ_CAPABILITY } from '../../contracts/src/page.ts';
 import { WIRE_VERSION } from '../../contracts/src/wire.ts';
 import type { ClientMessage, CoreMessage } from '../../contracts/src/wire.ts';
 import { PAGE_ENTRY, pageRoot, readPageResource } from './pages.ts';
+import { openDatabase } from './db.ts';
+import { createRepository } from './repository.ts';
 import { createLocalProvider } from './provider.ts';
 import { dataDir as resolveDataDir } from '../../hostpaths/src/index.ts';
 
@@ -50,6 +52,21 @@ const ACTIONS_OF: Record<string, readonly string[]> = {
   calendar: CALENDAR_ACTIONS,
   notes: NOTES_ACTIONS,
 };
+
+/**
+ * 库只开一次，日历与笔记两个身份共用（R01）。
+ *
+ * 以前是两个 JSON 文件、两份内存副本。现在共用一份库文件既是为了迁移只跑一次，
+ * 也是因为「同一个进程里两个身份各写一份」曾经造成过名册上两个日历 —— 数据库层面
+ * 共用一份，重复的参与者就是唯一那个了。
+ *
+ * 旧文件按身份列出来：它们的内容会被导进同一个库，导完改名成 `.migrated`。
+ */
+const database = openDatabase(
+  path.join(dataDir, 'local.db'),
+  KINDS.map((item) => path.join(dataDir, `${item.id}.json`)),
+);
+const repository = createRepository(database.db);
 
 /** 一个提供方进程同时提供日历与笔记，但各连一根管道 —— 寻址键必须唯一。 */
 function connectAs(pipe: string, identity: { id: string; kind: string }) {
@@ -124,7 +141,7 @@ function connectAs(pipe: string, identity: { id: string; kind: string }) {
   });
 
   const provider = createLocalProvider(
-    path.join(dataDir, `${identity.id}.json`),
+    repository,
     identity.kind as 'calendar' | 'notes',
   );
 
@@ -194,11 +211,14 @@ const links = KINDS.map((identity) => connectAs(pipe, identity));
 await Promise.all(links.map((link) => link.ready));
 
 process.stdout.write(
-  `ONE 本地提供方已接入：${KINDS.map((item) => item.id).join('、')}（数据目录 ${dataDir}）\n`,
+  `ONE 本地提供方已接入：${KINDS.map((item) => item.id).join('、')}（数据目录 ${dataDir}，库 ${database.file}${database.backup ? `，迁移前备份 ${database.backup}` : ''}）\n`,
 );
 
 const shutdown = () => {
   for (const link of links) link.close();
+  // 库要显式关。不关的话进程退出时 WAL 可能来不及并回主文件 —— 那不是丢数据
+  // （重开时会自己恢复），但会让「用户刚删掉的东西还在」这件事在文件层面成立。
+  database.close();
   process.exit(0);
 };
 process.on('SIGINT', shutdown);
