@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type net from 'node:net';
 import path from 'node:path';
@@ -7,6 +7,7 @@ import {
   createMemoryRuntime,
   createMockAgents,
 } from '../../packages/mock-runtime/src/index.ts';
+import { createAnthropicAgent } from './agents/anthropic.ts';
 import { isProviderId } from '../../packages/contracts/src/wire.ts';
 import type { ProviderId } from '../../packages/contracts/src/index.ts';
 import { createCore } from './core.ts';
@@ -135,6 +136,92 @@ const launchClient = (provider: ProviderId) => {
 const installed = readInstalled(dataDir());
 
 /**
+ * 代理地址。**由壳读 Windows 注册表后经环境变量递进来**（ADR-031）。
+ *
+ * 本体自己不读注册表：它得是零依赖、能跟着产物到处跑的一段 TypeScript，而注册表是
+ * Windows 宿主的事。壳那边只递一个 `host:port`，没开系统代理就不设这个变量。
+ *
+ * 形状不对就当没设 —— 直连总比「连一个瞎编的地址」好，而且启动日志会说清走的是哪条
+ * 路：直连 403 与代理 401 只差一个字，含义完全相反（ADR-031 的验收纪律）。
+ */
+function proxyFromEnv() {
+  const raw = (process.env['ONE_PROXY'] ?? '').trim();
+  if (!raw) return undefined;
+  const at = raw.lastIndexOf(':');
+  const port = Number.parseInt(raw.slice(at + 1), 10);
+  const host = raw.slice(0, at).trim();
+  if (
+    at <= 0 ||
+    !host ||
+    !Number.isInteger(port) ||
+    port <= 0 ||
+    port > 65535
+  ) {
+    process.stderr.write(
+      `ONE 本体：ONE_PROXY 写的是「${raw}」，看不懂，按直连处理\n`,
+    );
+    return undefined;
+  }
+  return { host, port };
+}
+
+/**
+ * API 密钥。**只在这一层读**（ADR-031 第 6 条）。
+ *
+ * 不下发客户端、不进插件、不进前端环境变量、不写进 `core.db` —— 那是一份明文数据库。
+ * 读取顺序是「环境变量 → 被 gitignore 的本地文件」：前者给开发与验收，后者给不想
+ * 每次开终端的日常使用。
+ *
+ * **没有 key 就退回模拟，并把这件事说出口。** 静默退回的话，界面上会一直显示
+ * 「Chat Agent · 模拟」而用户以为自己只是还没联网。
+ */
+function apiKeyFromEnv() {
+  const fromEnv = (process.env['ANTHROPIC_API_KEY'] ?? '').trim();
+  if (fromEnv) return fromEnv;
+  try {
+    const file = path.join(dataDir(), 'anthropic.key');
+    if (existsSync(file)) return readFileSync(file, 'utf8').trim() || undefined;
+  } catch (error) {
+    process.stderr.write(`ONE 本体：读本地密钥失败：${String(error)}\n`);
+  }
+  return undefined;
+}
+
+const proxy = proxyFromEnv();
+const apiKey = apiKeyFromEnv();
+const model = (process.env['ONE_MODEL'] ?? '').trim() || 'claude-sonnet-4-5';
+
+/**
+ * 挂哪些 Agent（ADR-028：Agent 是一个**列表**，不是一个）。
+ *
+ * **有 key 就把 `chat` 换成真的，没 key 就用模拟的。** 换的是这一个对象，会话状态机、
+ * 事件、Run、提议、界面一个字都不动 —— 这就是那条边界要兑现的东西。
+ *
+ * 走的是 `chat` 这个寻址键而不是新增一个：对话里「谁在说话」是 ONE 的事。给真模型
+ * 换个 id 的话，已有对话的 `agent.changed` 历史会对不上，而且界面上会出现两个看起来
+ * 差不多的选项。
+ */
+const mocks = createMockAgents();
+const chat = apiKey
+  ? createAnthropicAgent({
+      apiKey,
+      model,
+      system:
+        '你是 ONE 桌面助手里对话的那一个。ONE 的对话历史由用户自己拥有，' +
+        '你只回答当前这一句话。现在还不能替你写日历或笔记 —— 收到这类请求时，' +
+        '如实说明还没有这个能力，不要假装已经记下了。',
+      ...(proxy ? { proxy } : {}),
+    })
+  : mocks[0]!;
+/** 有 key 就把 `chat` 换成真的，没 key 就原样用三个模拟的。 */
+const agents = apiKey ? [chat, ...mocks.slice(1)] : mocks;
+process.stderr.write(
+  apiKey
+    ? `ONE 本体：对话接真实模型 ${model}（${proxy ? `经代理 ${proxy.host}:${proxy.port}` : '直连'}）\n`
+    : 'ONE 本体：没找到 API 密钥，对话仍是本地模拟（设置 ANTHROPIC_API_KEY 可接真模型）\n',
+);
+
+/**
  * 会话运行时：**对话归本体**（ADR-028）。
  *
  * Store 是 SQLite（`core.db`），Agent 是模拟的（`packages/mock-runtime`）。状态机只有
@@ -148,10 +235,7 @@ const conversationDatabase = openConversationDatabase(
   path.join(dataDir(), 'core.db'),
 );
 const conversationStore = createSqliteConversationStore(conversationDatabase);
-const runtime = createConversationRuntime(
-  conversationStore,
-  createMockAgents(),
-);
+const runtime = createConversationRuntime(conversationStore, agents);
 process.stderr.write(`ONE 本体：会话库 ${conversationDatabase.file}\n`);
 
 /**

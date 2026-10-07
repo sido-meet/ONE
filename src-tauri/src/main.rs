@@ -4,6 +4,7 @@ mod core_link;
 mod frames;
 mod layout;
 mod plugin;
+mod proxy;
 
 use std::sync::Arc;
 use std::time::Duration;

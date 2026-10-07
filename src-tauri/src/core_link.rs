@@ -369,6 +369,24 @@ pub fn start_core(app: &AppHandle) -> Result<(), String> {
             .current_dir(runtime.root())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped());
+        // **把系统代理读出来递给本体**（ADR-031）。
+        //
+        // Node 22 的 `fetch` 既不读 Windows 的系统代理，也没有 `NODE_USE_ENV_PROXY`
+        // （Node 24 才有）。于是本体直连，而 Anthropic 对直连按地区返回 **403** ——
+        // 那个 403 发生在认证之前，跟「key 不对」的 401 只差一个数字，排查方向会被
+        // 完全带偏。所以这里读注册表（留在 Windows 宿主边界），本体那边只认
+        // `host:port` 一个字符串。
+        //
+        // 没开系统代理就不设这个变量，本体直连 —— 与今天的行为一致。
+        match crate::proxy::system_proxy() {
+            Some((host, port)) => {
+                eprintln!("one: 系统代理 {host}:{port}，本体将经它连外网");
+                command.env("ONE_PROXY", format!("{host}:{port}"));
+            }
+            None => {
+                eprintln!("one: 系统代理没开，本体将直连");
+            }
+        }
         // 客户端本身是 GUI 子系统（不弹控制台），而 node 是控制台程序：父进程
         // 没有控制台时，Windows 会给它新分配一个，于是每开一次宠物就闪一个黑框。
         // CREATE_NO_WINDOW 让本体在后台安静地跑，日志仍然走 stderr 转发。
