@@ -19,6 +19,15 @@
   let coreState = $state(link.state());
   /** 送不出去的那句话。留着就能重试，清掉等于让用户重打一遍。 */
   let failure = $state<SendFailure | undefined>(undefined);
+  /** 数据面板：导出/删除在跑，以及做完之后要说给用户听的那一句。 */
+  let busy = $state(false);
+  let dataMessage = $state<string | undefined>(undefined);
+
+  /** 备份命令走本体的白名单（ADR-029）。错误要**原样说出来**，不吞掉。 */
+  const call = (command: string, ...args: string[]) =>
+    link.callCommand(command, args);
+  const messageOf = (cause: unknown) =>
+    cause instanceof Error ? cause.message : '出了点问题';
 
   /**
    * 每对话各留一份草稿（P06）。切走时存、切回时取，键是**对话**不是窗口 ——
@@ -129,6 +138,67 @@
       await action();
     } catch (cause) {
       failure = failureOf('', cause);
+    }
+  }
+
+  /**
+   * 导出一份备份（ADR-029）。
+   *
+   * 路径由本体定（`<数据目录>/exports/`），不在界面上让用户填 —— 这一版没有文件
+   * 选择框，给一个空输入框只会让人以为「点了没反应」。导完把**完整路径**说出来：
+   * 用户要拿它去别处存着，界面不给路径他就找不到。
+   */
+  async function exportData() {
+    busy = true;
+    dataMessage = undefined;
+    try {
+      const dir = (await call('dataExportDir')) as string;
+      const stamp = new Date()
+        .toISOString()
+        .replace(/[-:]/g, '')
+        .replace(/\..+/, '')
+        .replace('T', '-');
+      const file = `${dir}\\one-backup-${stamp}.json`;
+      await call('dataExport', file);
+      dataMessage = `已导出：${file}`;
+    } catch (cause) {
+      dataMessage = `导出没成功：${messageOf(cause)}`;
+    } finally {
+      busy = false;
+    }
+  }
+
+  /**
+   * 彻底删除当前这段对话。
+   *
+   * 这是**物理删除**：连事件一起从库里拿走，不留残迹（ADR-029 第 4 点）。所以要
+   * 用户再确认一次 —— 不可撤销的事不该一点就成。
+   */
+  async function forgetSelected() {
+    if (!conversation) return;
+    const name = conversation.title;
+    if (
+      !confirm(
+        `彻底删除「${name}」？\n\n里面的每一条消息都会从 ONE 的库里消失，恢复不了。\n（不确定的话，先「导出备份」。）`,
+      )
+    )
+      return;
+    busy = true;
+    dataMessage = undefined;
+    try {
+      await call('dataForgetConversation', conversation.id);
+      const left = client.getSnapshot().conversations;
+      // 选中项跟着走，别让下一次进对话页时停在一段已经不存在的对话上。
+      selectedId = left[0]?.id ?? '';
+      // **不要切走**：dataMessage 挂在数据面板上，切到对话页这句话就没人看得见了。
+      // 一次不可撤销的操作做完却一声不吭，比删错更让人不放心（实机验收时真踩到过）。
+      dataMessage = left.length
+        ? `已彻底删除「${name}」，还剩 ${left.length} 段对话。`
+        : `已彻底删除「${name}」。一段对话都不剩了 —— 「开始新对话」可以重新开始。`;
+    } catch (cause) {
+      dataMessage = `删除没成功：${messageOf(cause)}`;
+    } finally {
+      busy = false;
     }
   }
 
@@ -418,6 +488,40 @@
             <p>与宠物互调、窗口管理、完整的客户端联动界面。</p>
           </article>
         </div>
+
+        <!--
+          数据备份（ADR-029）。
+
+          **只说真的做到了的**：导出与彻底删除能在这个窗口里直接做；导入要指定
+          一个文件路径，而这一版没有文件选择框，所以它只能从命令行走 —— 下面把
+          命令原样写出来，用户复制就能用，不留一个「点这里导入」却点不开的入口。
+        -->
+        <section class="data-panel">
+          <h2>数据</h2>
+          <p class="data-note">
+            对话归 ONE 本体，日历与笔记归本地提供方，两边都在这台机器上。<b
+              >导出</b
+            >会把两边一起打包成一个文件。
+          </p>
+          <div class="data-actions">
+            <button
+              class="data-button"
+              type="button"
+              disabled={busy || coreState !== 'ready'}
+              onclick={() => exportData()}>导出备份</button
+            >
+            <button
+              class="data-button danger"
+              type="button"
+              disabled={busy || !conversation}
+              onclick={() => forgetSelected()}>彻底删除这段对话</button
+            >
+          </div>
+          {#if dataMessage}<p class="data-result">{dataMessage}</p>{/if}
+          <pre class="data-cli">恢复（命令行，需要完整路径）：
+node core/src/cli-main.ts import "C:\Users\你\备份.json"</pre>
+        </section>
+
         <p class="footnote">
           完整规划位于项目 README.md 与 docs/ 目录。此页用于说明开发阶段。
         </p>

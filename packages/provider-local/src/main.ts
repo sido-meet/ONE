@@ -2,11 +2,18 @@ import path from 'node:path';
 import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { ClientError, portableDetails } from '../../contracts/src/index.ts';
+import type { CommandContext } from '../../contracts/src/index.ts';
 import { CALENDAR_ACTIONS, NOTES_ACTIONS } from '../../contracts/src/index.ts';
 import { PAGE_READ_CAPABILITY } from '../../contracts/src/page.ts';
 import { WIRE_VERSION } from '../../contracts/src/wire.ts';
 import type { ClientMessage, CoreMessage } from '../../contracts/src/wire.ts';
 import { PAGE_ENTRY, pageRoot, readPageResource } from './pages.ts';
+import {
+  BACKUP_ACTIONS,
+  BACKUP_EXPORT_CAPABILITY,
+  BACKUP_IMPORT_CAPABILITY,
+  BACKUP_SCHEMA_VERSION,
+} from '../../contracts/src/backup.ts';
 import { openDatabase } from './db.ts';
 import { createRepository } from './repository.ts';
 import { createLocalProvider } from './provider.ts';
@@ -74,6 +81,11 @@ function connectAs(pipe: string, identity: { id: string; kind: string }) {
     ...ACTIONS_OF[identity.kind]!.map((action) => `${identity.kind}.${action}`),
     // 页面也是这个进程的一部分：它声明 page.read，本体才会把宿主的取页请求转过来。
     PAGE_READ_CAPABILITY,
+    // 备份是**跨域**能力：一个提供方的整份数据，不是某一个域的一次操作（ADR-029）。
+    // 两个身份各交自己那一份 —— 它们的表不同，混成一份会丢掉「谁拥有哪条数据」。
+    ...BACKUP_ACTIONS.map((action) =>
+      action === 'export' ? BACKUP_EXPORT_CAPABILITY : BACKUP_IMPORT_CAPABILITY,
+    ),
   ];
   // 资源根按身份分目录：一个身份读不到另一个身份的页面（实机抓到的串页）。
   const pages = pageRoot(identity.kind);
@@ -162,6 +174,38 @@ function connectAs(pipe: string, identity: { id: string; kind: string }) {
           ok: true,
           value: readPageResource(pages, asked?.path),
         });
+        return;
+      }
+      // 备份能力不带域前缀，所以走不到下面那段 `identity.kind.` 的分派里 ——
+      // 放到那里会被算成空 action，报「没有实现 data.export」。
+      if (
+        message.capability === BACKUP_EXPORT_CAPABILITY ||
+        message.capability === BACKUP_IMPORT_CAPABILITY
+      ) {
+        const asked = (message.args ?? {}) as {
+          context?: CommandContext;
+          data?: unknown;
+        };
+        const workspaceId = asked.context?.workspaceId ?? 'personal';
+        const value =
+          message.capability === BACKUP_EXPORT_CAPABILITY
+            ? {
+                schemaVersion: BACKUP_SCHEMA_VERSION,
+                kind: identity.kind,
+                data: repository.exportSlice(
+                  identity.kind as 'calendar' | 'notes',
+                  workspaceId,
+                ),
+              }
+            : (() => {
+                repository.replaceWorkspace(
+                  identity.kind as 'calendar' | 'notes',
+                  workspaceId,
+                  asked.data,
+                );
+                return { ok: true };
+              })();
+        await ask({ t: 'capability.result', id: message.id, ok: true, value });
         return;
       }
       // 能力名必须属于**本身份**。只取后半段的话，笔记身份会照办日历身份收到的

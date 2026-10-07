@@ -11,6 +11,8 @@ import type { ProviderId } from '../../packages/contracts/src/index.ts';
 import { createCore } from './core.ts';
 import type { DomainPorts } from './core.ts';
 import { createConversationRuntime } from '../../packages/conversation/src/runtime.ts';
+import { createBackupService } from './backup.ts';
+import type { BackupService } from './backup.ts';
 import {
   createSqliteConversationStore,
   openConversationDatabase,
@@ -103,8 +105,9 @@ const installed = readInstalled(dataDir());
 const conversationDatabase = openConversationDatabase(
   path.join(dataDir(), 'core.db'),
 );
+const conversationStore = createSqliteConversationStore(conversationDatabase);
 const runtime = createConversationRuntime(
-  createSqliteConversationStore(conversationDatabase),
+  conversationStore,
   createMockAgents(),
 );
 process.stderr.write(`ONE 本体：会话库 ${conversationDatabase.file}\n`);
@@ -139,11 +142,19 @@ const installedProviders = declarations.filter((item) =>
   installed.includes(item.id),
 );
 const ports: DomainPorts = {};
+/**
+ * 备份服务（ADR-029）与 `ports` 同一个套路：**后填的同一个可变位置**。
+ *
+ * 它要拿 core 自己的 `invoke` 去问参与者，而 core 此刻还没建好。命令每次调用现读
+ * `options.backup?.()`，所以装配顺序不影响它能不能用。
+ */
+let backupService: BackupService | undefined;
 const core = createCore(runtime, {
   version,
   installed,
   launchClient,
   domains: ports,
+  backup: () => backupService,
   // 清单变了由宿主落盘：本体持有「装了什么」这个决定，「记在哪」是它不关心的事。
   onInstalledChange: (ids) => {
     try {
@@ -156,6 +167,23 @@ const core = createCore(runtime, {
 const registry = createProviderRegistry(core, installedProviders);
 ports.calendar = registry.calendar;
 ports.notes = registry.notes;
+
+backupService = createBackupService({
+  core,
+  store: conversationStore,
+  version,
+  dataDir: dataDir(),
+  contextFor: (requestId: string) => ({
+    requestId,
+    workspaceId: 'personal',
+    // 备份是**用户**发起的（界面按钮或命令行），不是模型代劳，所以标 ui 不标 agent。
+    source: 'ui',
+  }),
+  // 导入或删掉对话之后，运行时的内存副本必须跟着换 —— 否则界面继续显示一份库里
+  // 已经不存在的东西，而用户以为没生效（ADR-028：状态只有一份）。
+  onConversationsReplaced: () => runtime.rebind(),
+});
+process.stderr.write(`ONE 本体：备份目录 ${backupService.exportDir()}\n`);
 
 /**
  * 拉起安装清单里的提供方，得到一串脚本名。

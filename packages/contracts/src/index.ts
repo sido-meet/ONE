@@ -4,6 +4,7 @@ export * from './localtime.ts';
 export * from './provider.ts';
 export * from './proposal.ts';
 export * from './page.ts';
+export * from './backup.ts';
 export * from './wire.ts';
 
 import type {
@@ -115,6 +116,13 @@ export interface ConversationRuntime {
     proposalId: string,
     resolution: ProposalResolution,
   ): Promise<Proposal>;
+  /**
+   * 存储被**整体改写**之后重新读一遍（ADR-029 导入备份、ADR-028 彻底删除对话）。
+   *
+   * 不这么做的话，界面会继续显示一份库里已经不存在的东西，而用户以为没生效 ——
+   * 「状态只有一份」这条规矩会在这时候破掉。
+   */
+  rebind(): void;
   dispose(): void;
 }
 
@@ -167,12 +175,28 @@ export interface ConversationStore {
     payloads: DurablePayloadInput[],
   ): DurableEvent[];
   createConversation(conversation: Conversation): void;
-  /** 改对话的 Agent，**与那条 `agent.changed` 事件同事务** —— 分开写就会出现「说换了但没换」。 */
+  /**
+   * 改对话的 Agent，**与那条 `agent.changed` 事件同事务** —— 分开写就会出现「说换了但没换」。
+   */
   setConversationAgent(
     conversationId: string,
     agentId: AgentId,
     payload: DurablePayloadInput,
   ): DurableEvent;
+  /**
+   * 整库改写。**只有导入备份会走它**，而且必须**一个事务**。
+   *
+   * 导入不是「追加」——一个半截的导入比不导入更糟：用户看着日历回来了，日程没了，
+   * 而没有任何地方告诉他这件事。所以要么全换成包里的样子，要么一点都不动。
+   */
+  replaceAll(state: ConversationState): void;
+  /**
+   * 彻底删掉一段对话：**物理删除**它的事件与行，不留残迹。
+   *
+   * 契约写着「追加历史不意味着永久不能删除私人数据」，所以这里是真删。删掉的对话
+   * 返回 `false`，让界面能说「找不到」而不是假装删过。
+   */
+  forgetConversation(conversationId: string): boolean;
   close(): void;
 }
 

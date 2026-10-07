@@ -359,6 +359,26 @@ export function createConversationRuntime(
           proposal,
       );
     },
+    rebind() {
+      // 内存里正在流的半截回复已经没有意义了 —— 库都被换掉了，那次 Run 在新状态里
+      // 什么都不是。清掉定时器，不然它会对着一个已经不存在的对话继续写。
+      timers.forEach(clearInterval);
+      timers.clear();
+      attempts.clear();
+      for (const key of Object.keys(drafts)) delete drafts[key];
+      const fresh = store.open();
+      state.workspaces = fresh.workspaces;
+      state.conversations = fresh.conversations;
+      state.events = fresh.events;
+      // 新库里的「正在跑」同样是上次留下的 —— 按开库那套规矩诚实地收尾。
+      for (const run of indexRuns(state.events)) {
+        if (run.status === 'running')
+          appendBatch(run.conversationId, [
+            { type: 'run.finished', run: { ...run, status: 'interrupted' } },
+          ]);
+      }
+      notify();
+    },
     dispose() {
       timers.forEach(clearInterval);
       timers.clear();

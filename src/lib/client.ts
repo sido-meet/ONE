@@ -47,6 +47,8 @@ function placeholderClient(): ConversationRuntime {
     cancelRun: async () => undefined,
     // 提议由本体解决，界面只能转达用户的决定（ADR-022）。
     settleProposal: unavailable,
+    // 占位实现没有任何状态可重绑；本体改了库会广播新快照（ADR-029）。
+    rebind: () => undefined,
     dispose: () => undefined,
   };
 }

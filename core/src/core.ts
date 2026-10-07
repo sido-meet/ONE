@@ -31,6 +31,7 @@ import {
 import { WIRE_VERSION } from '../../packages/contracts/src/wire.ts';
 import { isProviderId } from '../../packages/contracts/src/wire.ts';
 import { PAGE_READ_CAPABILITY } from '../../packages/contracts/src/page.ts';
+import type { BackupService } from './backup.ts';
 
 /**
  * ONE 本体的会话中枢（ADR-013）。
@@ -77,6 +78,11 @@ export interface CoreOptions {
    * 停在进程启动时的样子。
    */
   onInstalledChange?: (ids: ProviderId[]) => void;
+  /**
+   * 备份服务（ADR-029）。**是函数而不是值**：备份服务要拿 core 自己的 `invoke` 去问
+   * 参与者，而 core 此刻还没建好 —— 与 `domains` 同一个套路，装配点后填。
+   */
+  backup?: () => BackupService | undefined;
 }
 
 interface Session {
@@ -290,6 +296,33 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
       runtime.sendMessage(args[0] as string, args[1] as string),
     cancelRun: (...args) => runtime.cancelRun(args[0] as string),
     proposalResolve: (...args) => resolveProposal(args),
+    /**
+     * 备份三件事（ADR-029）。
+     *
+     * 走本体是有原因的，不只是「顺手」：数据分两个库、两个进程，只有本体能同时看到
+     * 两边。客户端与插件页面都拿不到这一组命令 —— 前者只在命令白名单里，后者只认
+     * `calendar.*` / `notes.*`。
+     */
+    dataExport: async (file) => {
+      const service = options.backup?.();
+      if (!service) throw new ClientError('UNAVAILABLE', '备份服务还没就绪');
+      return service.exportTo(String(file ?? ''));
+    },
+    dataImport: async (file) => {
+      const service = options.backup?.();
+      if (!service) throw new ClientError('UNAVAILABLE', '备份服务还没就绪');
+      return service.importFrom(String(file ?? ''));
+    },
+    dataForgetConversation: async (...args) => {
+      const service = options.backup?.();
+      if (!service) throw new ClientError('UNAVAILABLE', '备份服务还没就绪');
+      const id = String(args[0] ?? '');
+      service.forget(id);
+      // 删完要让界面知道：留下来的名字还挂在侧栏上，用户会以为没删掉。
+      pushState();
+      return { forgotten: id };
+    },
+    dataExportDir: async () => options.backup?.()?.exportDir() ?? '',
     /**
      * 装上/卸下提供方。这是 0.1 的「安装器」：清单落盘由宿主做，本体只改决定。
      *

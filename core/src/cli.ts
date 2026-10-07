@@ -165,6 +165,32 @@ export async function runCli(argv: string[], pipe?: string) {
       args: [argv.slice(1)],
     }));
     process.stdout.write(`${JSON.stringify(reply)}\n`);
+  } else if (first === 'export' || first === 'import') {
+    // 备份（ADR-029）。路径必须给完整路径 —— 相对路径的分歧不该由本体替用户决定。
+    const reply = await ask((id) => ({
+      t: 'call',
+      id,
+      cmd: first === 'export' ? 'dataExport' : 'dataImport',
+      args: [argv[1] ?? ''],
+    }));
+    process.stdout.write(`${JSON.stringify(reply)}\n`);
+  } else if (first === 'forget') {
+    // 彻底删除一段对话：物理删除，连事件一起（ADR-028）。
+    const reply = await ask((id) => ({
+      t: 'call',
+      id,
+      cmd: 'dataForgetConversation',
+      args: [second ?? ''],
+    }));
+    process.stdout.write(`${JSON.stringify(reply)}\n`);
+  } else if (first === 'exportdir') {
+    const reply = await ask((id) => ({
+      t: 'call',
+      id,
+      cmd: 'dataExportDir',
+      args: [],
+    }));
+    process.stdout.write(`${JSON.stringify(reply)}\n`);
   } else if (first === 'installed') {
     const reply = await ask((id) => ({ t: 'clients.list', id }));
     process.stdout.write(`${JSON.stringify(reply)}\n`);

@@ -59,6 +59,173 @@ const summaryOf = (row: Row): NoteSummary => ({
   updatedAt: text(row, 'updated_at'),
 });
 
+/* ---------- 备份那一段的形状（ADR-029） ---------- */
+
+/** 备份里的一条实体。字段与 0.1 的 JSON 文件一致，导入与恢复走同一条路。 */
+interface EntityShape {
+  id: string;
+  workspaceId: string;
+  title: string;
+  version: number;
+  sourceConversationId?: string;
+}
+interface CalendarEntity extends EntityShape {
+  startsAt: string;
+  endsAt: string;
+  timeZone: string;
+}
+interface NoteEntity extends EntityShape {
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+}
+interface AuditShape {
+  auditRef: string;
+  entityType: string;
+  id: string;
+  workspaceId: string;
+  deletedAt: string;
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+const isLine = (value: unknown): value is string =>
+  typeof value === 'string' && value.length > 0 && value.length <= 1024;
+const isCount = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isInteger(value) && value >= 0;
+
+const entityOf = (value: unknown): EntityShape | null => {
+  if (!isRecord(value)) return null;
+  if (!isLine(value.id) || !isLine(value.workspaceId) || !isLine(value.title))
+    return null;
+  if (!isCount(value.version)) return null;
+  if (
+    value.sourceConversationId !== undefined &&
+    !isLine(value.sourceConversationId)
+  )
+    return null;
+  return {
+    id: value.id,
+    workspaceId: value.workspaceId,
+    title: value.title,
+    version: value.version,
+    ...(value.sourceConversationId
+      ? { sourceConversationId: value.sourceConversationId }
+      : {}),
+  };
+};
+
+/**
+ * 校验一份备份数据，**全过了才返回**，任何一处不像样就抛。
+ *
+ * 这是**不可信输入**：包可能是用户从别处拿的，也可能是自己半年前导的。所以一律
+ * 「不认识就拒」，不做尽力而为的修补 —— 猜错一个字段会把数据写坏，而写坏的数据
+ * 用户往往要到很久以后才发现。
+ *
+ * 一条都没校验过就写库，比完全不导入糟得多：用户看着日历回来了、日程没了。
+ */
+function parseBackupSlice(
+  kind: 'calendar' | 'notes',
+  data: unknown,
+): {
+  entities: (CalendarEntity | NoteEntity)[];
+  audits: AuditShape[];
+  receipts: Record<string, { digest: string; result: unknown }>;
+} {
+  if (!isRecord(data))
+    throw new ClientError('VALIDATION', '备份里这一份不是一个对象。');
+  const raw = kind === 'calendar' ? data.calendarEvents : data.notes;
+  if (!Array.isArray(raw))
+    throw new ClientError(
+      'VALIDATION',
+      kind === 'calendar' ? '备份里没有日程列表。' : '备份里没有笔记列表。',
+    );
+  const entities: (CalendarEntity | NoteEntity)[] = [];
+  for (const item of raw) {
+    const base = entityOf(item);
+    if (!base)
+      throw new ClientError(
+        'VALIDATION',
+        '备份里有一条记录字段不对，没有导入任何内容。',
+      );
+    if (kind === 'calendar') {
+      const event = item as Record<string, unknown>;
+      if (
+        !isLine(event.startsAt) ||
+        !isLine(event.endsAt) ||
+        !isLine(event.timeZone)
+      )
+        throw new ClientError(
+          'VALIDATION',
+          '备份里有一条日程字段不对，没有导入任何内容。',
+        );
+      entities.push({
+        ...base,
+        startsAt: event.startsAt,
+        endsAt: event.endsAt,
+        timeZone: event.timeZone,
+      });
+    } else {
+      const note = item as Record<string, unknown>;
+      if (
+        !isLine(note.body) ||
+        !isLine(note.createdAt) ||
+        !isLine(note.updatedAt)
+      )
+        throw new ClientError(
+          'VALIDATION',
+          '备份里有一条笔记字段不对，没有导入任何内容。',
+        );
+      entities.push({
+        ...base,
+        body: note.body,
+        createdAt: note.createdAt,
+        updatedAt: note.updatedAt,
+      });
+    }
+  }
+  const audits: AuditShape[] = [];
+  if (data.audits !== undefined) {
+    if (!Array.isArray(data.audits))
+      throw new ClientError('VALIDATION', '备份里的审计条目不是一个列表。');
+    for (const item of data.audits) {
+      if (
+        !isRecord(item) ||
+        !isLine(item.auditRef) ||
+        !isLine(item.entityType) ||
+        !isLine(item.id) ||
+        !isLine(item.workspaceId) ||
+        !isLine(item.deletedAt)
+      )
+        throw new ClientError(
+          'VALIDATION',
+          '备份里有一条审计条目不对，没有导入任何内容。',
+        );
+      audits.push({
+        auditRef: item.auditRef,
+        entityType: item.entityType,
+        id: item.id,
+        workspaceId: item.workspaceId,
+        deletedAt: item.deletedAt,
+      });
+    }
+  }
+  const receipts: Record<string, { digest: string; result: unknown }> = {};
+  if (data.receipts !== undefined) {
+    if (!isRecord(data.receipts))
+      throw new ClientError('VALIDATION', '备份里的幂等回执不是一个对象。');
+    for (const [key, value] of Object.entries(data.receipts)) {
+      if (!isRecord(value) || !isLine(value.digest))
+        throw new ClientError(
+          'VALIDATION',
+          '备份里有一条幂等回执不对，没有导入任何内容。',
+        );
+      receipts[key] = { digest: value.digest, result: value.result };
+    }
+  }
+  return { entities, audits, receipts };
+}
+
 const eventOf = (row: Row): CalendarEvent => ({
   id: text(row, 'id'),
   workspaceId: text(row, 'workspace_id'),
@@ -132,6 +299,19 @@ export interface Repository {
     input: { id: string; expectedVersion: number },
     idempotency: { key: string; digest: string },
   ): DeleteResult;
+
+  /** 交出这个身份的全部数据（ADR-029）。形状与 0.1 的 JSON 文件一致。 */
+  exportSlice(kind: 'calendar' | 'notes', workspaceId: string): unknown;
+  /**
+   * 整库改写这个工作区的这一份数据，一个事务（ADR-029）。
+   *
+   * **先整体校验，全过了才动任何一行** —— 半截导入比不导入更糟。
+   */
+  replaceWorkspace(
+    kind: 'calendar' | 'notes',
+    workspaceId: string,
+    data: unknown,
+  ): void;
 }
 
 /** 游标是契约校验过的纯数字串（`/^\d+$/`），这里只把它翻成 OFFSET。 */
@@ -155,6 +335,18 @@ export function createRepository(db: DatabaseSync): Repository {
   const insertAudit = db.prepare(
     `INSERT INTO audit_entries (audit_ref, entity_type, id, workspace_id, deleted_at)
      VALUES (?, ?, ?, ?, ?)`,
+  );
+  // 导入用：整份按原样写回去，不走 create/update —— 那是给「用户新建/编辑」走的，
+  // 带版本守卫与幂等回执，备份恢复不需要再走一遍那套语义。
+  const insertEvent = db.prepare(
+    `INSERT INTO calendar_events
+       (id, workspace_id, title, starts_at, ends_at, time_zone, version, source_conversation_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const insertNote = db.prepare(
+    `INSERT INTO notes
+       (id, workspace_id, title, body, version, source_conversation_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   );
 
   /**
@@ -573,6 +765,129 @@ export function createRepository(db: DatabaseSync): Repository {
           result,
         );
         return result;
+      });
+    },
+    /**
+     * 交出**这个身份**的全部数据（ADR-029）。
+     *
+     * 形状与 0.1 的 JSON 文件一模一样 —— 日历身份交 `{calendarEvents, audits,
+     * receipts}`，笔记身份交 `{notes, audits, receipts}`。这不是偷懒：备份格式与
+     * 迁移格式一致，导入与恢复走的是同一条解析与写入路径，少一处能出错的地方。
+     *
+     * **回执与审计一起交**，不然导入之后「这把幂等键用过没有」就丢了，重复确认会
+     * 建出第二条 —— 而用户看到的是「我只是点了一下」。
+     */
+    exportSlice(kind: 'calendar' | 'notes', workspaceId: string): unknown {
+      const entityTable = kind === 'calendar' ? 'calendar_events' : 'notes';
+      const entities = db
+        .prepare(`SELECT * FROM ${entityTable} WHERE workspace_id = ?`)
+        .all(workspaceId) as Row[];
+      const audits = db
+        .prepare(
+          'SELECT * FROM audit_entries WHERE workspace_id = ? AND entity_type = ?',
+        )
+        .all(
+          workspaceId,
+          kind === 'calendar' ? 'calendarEvent' : 'note',
+        ) as Row[];
+      const receipts = db
+        .prepare('SELECT * FROM command_receipts WHERE workspace_id = ?')
+        .all(workspaceId) as {
+        idempotency_key: string;
+        digest: string;
+        result: string;
+      }[];
+      return {
+        ...(kind === 'calendar'
+          ? { calendarEvents: entities.map(eventOf) }
+          : { notes: entities.map(noteOf) }),
+        audits: audits.map((row) => ({
+          auditRef: text(row, 'audit_ref'),
+          entityType: text(row, 'entity_type'),
+          id: text(row, 'id'),
+          workspaceId: text(row, 'workspace_id'),
+          deletedAt: text(row, 'deleted_at'),
+        })),
+        // 键是 `${workspaceId}:${idempotencyKey}`，与 0.1 保持一致：回执的键空间由
+        // 提供方自己定义，本体不解释（ADR-029）。
+        receipts: Object.fromEntries(
+          receipts.map((row) => [
+            `${workspaceId}:${row.idempotency_key}`,
+            { digest: row.digest, result: JSON.parse(row.result) as unknown },
+          ]),
+        ),
+      };
+    },
+    /**
+     * **整库改写**这个工作区的这一份数据，一个事务（ADR-029）。
+     *
+     * 先整体校验、全过了再动任何一行：半截导入比不导入更糟 —— 用户看着日历回来了、
+     * 日程没了，而没有任何地方告诉他这件事。
+     */
+    replaceWorkspace(
+      kind: 'calendar' | 'notes',
+      workspaceId: string,
+      data: unknown,
+    ): void {
+      const slice = parseBackupSlice(kind, data);
+      const entityTable = kind === 'calendar' ? 'calendar_events' : 'notes';
+      const entityType = kind === 'calendar' ? 'calendarEvent' : 'note';
+      transaction(db, () => {
+        db.prepare(`DELETE FROM ${entityTable} WHERE workspace_id = ?`).run(
+          workspaceId,
+        );
+        db.prepare(
+          'DELETE FROM audit_entries WHERE workspace_id = ? AND entity_type = ?',
+        ).run(workspaceId, entityType);
+        db.prepare('DELETE FROM command_receipts WHERE workspace_id = ?').run(
+          workspaceId,
+        );
+        for (const entity of slice.entities) {
+          if (kind === 'calendar') {
+            const event = entity as CalendarEntity;
+            insertEvent.run(
+              event.id,
+              event.workspaceId,
+              event.title,
+              event.startsAt,
+              event.endsAt,
+              event.timeZone,
+              event.version,
+              event.sourceConversationId ?? null,
+            );
+          } else {
+            const note = entity as NoteEntity;
+            insertNote.run(
+              note.id,
+              note.workspaceId,
+              note.title,
+              note.body,
+              note.version,
+              note.sourceConversationId ?? null,
+              note.createdAt,
+              note.updatedAt,
+            );
+          }
+        }
+        for (const audit of slice.audits)
+          insertAudit.run(
+            audit.auditRef,
+            audit.entityType,
+            audit.id,
+            audit.workspaceId,
+            audit.deletedAt,
+          );
+        for (const [key, receipt] of Object.entries(slice.receipts)) {
+          const cut = key.indexOf(':');
+          if (cut <= 0) continue;
+          insertReceipt.run(
+            key.slice(0, cut),
+            key.slice(cut + 1),
+            receipt.digest,
+            JSON.stringify(receipt.result),
+            new Date().toISOString(),
+          );
+        }
       });
     },
   };

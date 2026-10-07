@@ -123,6 +123,9 @@ export function createSqliteConversationStore(
     `INSERT INTO conversations (id, workspace_id, title, agent_id, created_at)
      VALUES (?, ?, ?, ?, ?)`,
   );
+  const insertWorkspace = db.prepare(
+    'INSERT INTO workspaces (id, name) VALUES (?, ?)',
+  );
   const updateAgent = db.prepare(
     'UPDATE conversations SET agent_id = ? WHERE id = ?',
   );
@@ -251,6 +254,58 @@ export function createSqliteConversationStore(
           schemaVersion: 1,
           createdAt,
         } as DurableEvent;
+      });
+    },
+    replaceAll(state: ConversationState) {
+      // **一个事务**：要么全换成包里的样子，要么一点都不动。半截的导入比不导入更糟 ——
+      // 用户看着日历回来了、日程没了，而没有任何地方告诉他这件事。
+      transaction(db, () => {
+        db.exec('DELETE FROM conversation_events');
+        db.exec('DELETE FROM conversations');
+        db.exec('DELETE FROM workspaces');
+        for (const workspace of state.workspaces)
+          insertWorkspace.run(workspace.id, workspace.name);
+        for (const conversation of state.conversations)
+          insertConversation.run(
+            conversation.id,
+            conversation.workspaceId,
+            conversation.title,
+            conversation.agentId,
+            conversation.createdAt,
+          );
+        for (const event of state.events) {
+          const { type, ...body } = event as DurableEvent &
+            Record<string, unknown>;
+          insertEvent.run(
+            event.conversationId,
+            event.seq,
+            event.id,
+            type,
+            JSON.stringify(body),
+            Number(event.schemaVersion),
+            event.createdAt,
+          );
+        }
+      });
+    },
+    forgetConversation(conversationId: string) {
+      return transaction(db, () => {
+        // 先看有没有：找不到就说找不到，不假装删过 —— 界面要区分「删掉了」与
+        // 「本来就没有」，这两句话给的动作完全不同。
+        const found = db
+          .prepare('SELECT COUNT(*) AS c FROM conversations WHERE id = ?')
+          .get(conversationId) as { c: number };
+        if (found.c === 0) return false;
+        db.prepare(
+          'DELETE FROM conversation_events WHERE conversation_id = ?',
+        ).run(conversationId);
+        db.prepare('DELETE FROM agent_bindings WHERE conversation_id = ?').run(
+          conversationId,
+        );
+        db.prepare('DELETE FROM conversations WHERE id = ?').run(
+          conversationId,
+        );
+        return true;
       });
     },
     close() {

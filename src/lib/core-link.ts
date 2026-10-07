@@ -435,6 +435,13 @@ export function createCoreClient(
         call('sendMessage', [conversationId, text]),
       cancelRun: (runId: string) => call('cancelRun', [runId]),
       /**
+       * 客户端**没有**自己的状态可重绑：本体改了库会广播新快照（ADR-029）。
+       *
+       * 保留这个方法是为了让 `ConversationRuntime` 在两侧形状一致 —— 本体那份有
+       * 内存副本要换，客户端这份只有一份从本体收到的缓存。
+       */
+      rebind: () => {},
+      /**
        * 界面**不能**自己解决提议：写入领域数据的一直是本体（ADR-016/022）。
        *
        * 这一条只是把用户的决定送过去 —— 本体决定要不要写、写没写。真正的入口是

@@ -108,6 +108,34 @@ export function createMemoryStore(
       if (conversation) conversation.agentId = agentId;
       return this.appendBatch(conversationId, [payload])[0]!;
     },
+    replaceAll(state: ConversationState) {
+      assertOpen();
+      // 全量替换，不是「追加」——半截的导入比不导入更糟。
+      workspaces.length = 0;
+      workspaces.push(...structuredClone(state.workspaces));
+      conversations.length = 0;
+      conversations.push(...structuredClone(state.conversations));
+      events.length = 0;
+      events.push(...structuredClone(state.events));
+      lastSeq.clear();
+      for (const event of events) {
+        const current = lastSeq.get(event.conversationId) ?? 0;
+        if (event.seq > current) lastSeq.set(event.conversationId, event.seq);
+      }
+    },
+    forgetConversation(conversationId: string) {
+      assertOpen();
+      const index = conversations.findIndex(
+        (item) => item.id === conversationId,
+      );
+      // 找不到就说找不到，不假装删过 —— 界面要区分「删掉了」与「本来就没有」。
+      if (index < 0) return false;
+      conversations.splice(index, 1);
+      for (let i = events.length - 1; i >= 0; i -= 1)
+        if (events[i]!.conversationId === conversationId) events.splice(i, 1);
+      lastSeq.delete(conversationId);
+      return true;
+    },
     close() {
       closed = true;
     },
