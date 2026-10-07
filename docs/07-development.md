@@ -66,6 +66,28 @@ Set-Location src-tauri; cargo test   # 窗口定位、菜单接线、帧边界�
 
 **发布版必须用 `pnpm desktop:build`。** `cargo build --release` 不会重新嵌入前端资源，会得到一个打开就是"无法访问此页面"的程序。`scripts/client.mjs` 会先确保本体在运行、再拉起客户端。
 
+## 无头验收 P04 的日程闭环
+
+宠物窗口可能被别的东西盖住、无边框置顶窗口又常常拿不到键盘焦点，因此提议的确认与拒绝在命令行也做得到（ADR-022：只在界面上能点的按钮，等于给卡住的时候留了一条死路）。本体自身不依赖图形界面就能用，正是这条命令行存在的理由。
+
+```powershell
+# 1. 宠物端 + 真实提供方（本体走 dist-runtime 里的自带 node）
+$env:ONE_INSTALLED = "pet,local.calendar,local.notes"
+Start-Process src-tauri\target\release\one-desktop.exe -ArgumentList "--client=pet","--open-bubble"
+
+# 2. 聊天里说一句话 → 本体起草一条待确认的日程
+node .one/run-cli.mjs .one\out.json send welcome 明天下午三点安排面试
+node .one/run-cli.mjs .one\out.json proposal list
+
+# 3. 确认两次：第一次 applied:true，第二次 applied:false 且 entityId 相同，
+#    日历里仍只有一条 —— 这就是「重复确认不重复创建」的真机证据
+node .one/run-cli.mjs .one\out.json proposal confirm <id>
+node .one/run-cli.mjs .one\out.json proposal confirm <id>
+node .one/run-cli.mjs .one\out.json calendar list '{"rangeStart":"...","rangeEnd":"...","timeZone":"Asia/Shanghai"}'
+```
+
+对话条在露出卡片时换高（`resize_bubble` 三档：平时 168 / 结果卡 208 / 带按钮 262）。**改的是窗口高度而不是界面的一个类** —— 界面自己加 class 的话，被切掉的是输入框，看起来就像「ONE 不能打字了」；改完必须重新仲裁整组附属窗口（ADR-020）。
+
 **`dist-runtime/` 里有 80MB 以上的 `node.exe`，已 gitignore，不要提交。** 重新打包前先关掉上一轮起着的宠物与本体：那份 `node.exe` 正被进程锁着，否则打包会失败（脚本会直接告诉你原因，不会甩一坨 EIO 栈）。要验证产物路径，把 `dist-runtime` 放到 exe 旁边即可 —— 壳启动时第一件事就是打一行日志，说明本体实际用的是哪份 node：
 
 ```

@@ -90,6 +90,15 @@ export const shell = {
   closePluginWindow: () => invoke('close_plugin_window'),
   /** 展开/收起摘要面板。窗口高度只有壳知道怎么改，界面只说意图。 */
   resizeSummary: (expanded: boolean) => invoke('resize_summary', { expanded }),
+  /**
+   * 对话条换高。理由同 `resizeSummary`：窗口高度只有壳能改，界面只说意图 ——
+   * 界面自己加一个 class 的话，被切掉的是输入框，看起来就像「ONE 不能打字了」。
+   *
+   * 三档：平时、带结果卡、带按钮的待确认卡。后两者差着一行按钮，塞进同一档
+   * 要么下面空一大块，要么按钮那张被切掉（实机两种都拍到过）。
+   */
+  resizeBubble: (mode: 'normal' | 'card' | 'action') =>
+    invoke('resize_bubble', { mode }),
   hideSummary: () => invoke('hide_summary'),
   quit: () => invoke('quit_app'),
   /** Called by the shell after the view stopped what was running. */

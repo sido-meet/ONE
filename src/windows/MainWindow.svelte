@@ -3,7 +3,9 @@
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import type { AgentId } from '../../packages/contracts/src';
   import { client, link } from '../lib/client';
+  import { proposalsByMessage } from '../lib/proposal';
   import { shell, listenBeforeQuit } from '../lib/tauri';
+  import ProposalCard from './ProposalCard.svelte';
 
   // 本轮范围：桌面端只保证"能独立接上本体、不假装有功能"，交互打磨放到后面。
   let snapshot = $state(client.getSnapshot());
@@ -12,6 +14,12 @@
   let input = $state('');
   let error = $state('');
   let coreState = $state(link.state());
+
+  /** 按 messageId 分组一次，渲染时直接查 —— 别在模板里 filter 整个数组。 */
+  const proposalsOf = $derived.by(() => {
+    const grouped = proposalsByMessage(snapshot.proposals);
+    return (messageId: string) => grouped.get(messageId) ?? [];
+  });
 
   const agents: { id: AgentId; name: string }[] = [
     { id: 'chat', name: 'Chat Agent' },
@@ -205,6 +213,11 @@
                   : `${agentName(event.message.agentId ?? 'chat')} · 模拟`}
               </div>
               <p>{event.message.content}</p>
+              <!-- 提议挂在**自己那条**回复下面（ADR-022）。归属靠 messageId，
+                   不靠「最新的那条」—— 那样三张卡会全部堆到最后一句上。 -->
+              {#each proposalsOf(event.message.id) as proposal (proposal.id)}
+                <ProposalCard {proposal} />
+              {/each}
             </article>
           {:else if event.type === 'agent.changed'}
             <p class="event-divider">

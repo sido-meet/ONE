@@ -45,6 +45,8 @@ function placeholderClient(): ConversationRuntime {
     changeAgent: async () => undefined,
     sendMessage: unavailable,
     cancelRun: async () => undefined,
+    // 提议由本体解决，界面只能转达用户的决定（ADR-022）。
+    settleProposal: unavailable,
     dispose: () => undefined,
   };
 }
@@ -82,6 +84,7 @@ function placeholderLink(): CoreClient {
     launch: noLink,
     callCapability: noLink,
     callCommand: noLink,
+    resolveProposal: noLink,
     expose: () => undefined,
     dispose: () => undefined,
   };

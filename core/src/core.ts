@@ -10,6 +10,7 @@ import type {
   ParticipantInfo,
   ProviderId,
   ProviderSlot,
+  ProposalResolution,
   RosterEntry,
 } from '../../packages/contracts/src/index.ts';
 import {
@@ -21,7 +22,10 @@ import {
   parseNotesDelete,
   parseNotesList,
   parseNotesUpdate,
+  parseProposalResolve,
+  proposalIdempotencyKey,
   resolveProvider,
+  settledResolution,
 } from '../../packages/contracts/src/index.ts';
 import { WIRE_VERSION } from '../../packages/contracts/src/wire.ts';
 import { PAGE_READ_CAPABILITY } from '../../packages/contracts/src/page.ts';
@@ -124,6 +128,70 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
   const contextOf = (args: unknown[]) => args[0] as CommandContext;
 
   /**
+   * 确认一条待写入的提议：本体是唯一动手的人（ADR-016/022）。
+   *
+   * 四件事按顺序发生，顺序本身就是行为：
+   *
+   * 1. 先看这条提议**在不在** —— 不在就是 NOT_FOUND，不能凭空造一条。
+   * 2. 已经解决过的**直接回既有结果**，不再写第二次。这是「重复确认不重复创建」
+   *    的定义；返回 `applied: false` 让界面能说清「已经建过了」，而不是假装
+   *    又干了一遍。两次确认并发到达时由提供方的幂等键兜底（键由提议 id 派生），
+   *    因此这里不需要锁 —— 拦住重复的是数据，不是时序。
+   * 3. 拒绝**不碰提供方**：数据一个字节都不变，界面照实说「没写进去」。
+   * 4. 确认才写。工作区取自**提议自己**而不是客户端上报的值：客户端只是
+   *    一块屏幕，它没有资格决定写进谁的空间。
+   */
+  const resolveProposal = async (args: unknown[]) => {
+    const input = parseProposalResolve(args[0]);
+    const proposal = runtime
+      .getSnapshot()
+      .proposals.find((item) => item.id === input.proposalId);
+    if (!proposal)
+      throw new ClientError('NOT_FOUND', '找不到这条提议', {
+        proposalId: input.proposalId,
+      });
+    if (proposal.status !== 'pending') return settledResolution(proposal);
+
+    const at = new Date().toISOString();
+    if (input.decision === 'reject') {
+      const resolution: ProposalResolution = {
+        proposalId: input.proposalId,
+        applied: true,
+        status: 'rejected',
+        reason: input.reason,
+        at,
+      };
+      await runtime.settleProposal(input.proposalId, resolution);
+      return resolution;
+    }
+
+    // 可用性先于输入校验，与其他领域命令同一顺序（见 resolveProvider）。
+    const provider = resolveProvider(domains.calendar?.(), 'calendar');
+    const context: CommandContext = {
+      requestId: `proposal-${input.proposalId}`,
+      workspaceId: proposal.workspaceId,
+      source: 'ui',
+    };
+    const event = await provider.create(
+      context,
+      parseCalendarCreate({
+        ...proposal.draft,
+        sourceConversationId: proposal.sourceConversationId,
+        idempotencyKey: proposalIdempotencyKey(proposal.id),
+      }),
+    );
+    const resolution: ProposalResolution = {
+      proposalId: input.proposalId,
+      applied: true,
+      status: 'created',
+      entityId: event.id,
+      at,
+    };
+    await runtime.settleProposal(input.proposalId, resolution);
+    return resolution;
+  };
+
+  /**
    * Whitelisted dispatch: the name arrives over the wire and is never trusted.
    *
    * 领域命令的顺序是「先解析提供方，再校验输入」：提供方不可用时校验参数没有
@@ -138,6 +206,19 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
     sendMessage: (...args) =>
       runtime.sendMessage(args[0] as string, args[1] as string),
     cancelRun: (...args) => runtime.cancelRun(args[0] as string),
+    proposalResolve: (...args) => resolveProposal(args),
+    /**
+     * 列出提议。界面靠快照里的 `proposals` 就够了，这条是给命令行与排障用的 ——
+     * 它读的是**同一份**状态，不是另一处拷贝。
+     */
+    listProposals: async () =>
+      runtime.getSnapshot().proposals.map((item) => ({
+        id: item.id,
+        domain: item.domain,
+        status: item.status,
+        title: item.domain === 'calendar' ? item.draft.title : '',
+        startsAt: item.domain === 'calendar' ? item.draft.startsAt : undefined,
+      })),
     calendarList: (...args) =>
       resolveProvider(domains.calendar?.(), 'calendar').list(
         contextOf(args),

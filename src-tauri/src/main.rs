@@ -25,6 +25,15 @@ const GAP: i32 = 12;
 const SUMMARY_COLLAPSED_HEIGHT: f64 = 96.0;
 const SUMMARY_EXPANDED_HEIGHT: f64 = 420.0;
 const SUMMARY_WIDTH: f64 = 360.0;
+/// 对话条平时是一条状态云加一条输入条。**有待确认的日程草稿时换高**——
+/// 卡片连同两个按钮比状态云高得多，硬塞进 168 会把输入条切掉一半，而切掉的
+/// 正好是用户要打字的那一半（实机抓图看到的）。
+const BUBBLE_WIDTH: f64 = 380.0;
+const BUBBLE_HEIGHT: f64 = 168.0;
+/// 露出结果卡时：比平时高一点，因为卡片的「没写进去：……」理由可能要折两行。
+const BUBBLE_CARD_HEIGHT: f64 = 208.0;
+/// 露出带按钮的待确认卡片时：按钮加一行时间，比结果卡再高一截。
+const BUBBLE_ACTION_HEIGHT: f64 = 262.0;
 /// Menu item ids. A menu entry without a handler is a button that silently does
 /// nothing, so the ids are constants and `menu_action` has to answer for all of
 /// them (see the test of the same name).
@@ -70,7 +79,7 @@ fn menu_action(id: &str) -> Option<MenuAction> {
 /// If the host window cannot answer, quitting must not hang the app.
 const QUIT_GRACE: Duration = Duration::from_millis(3000);
 /// Kept in sync with packages/contracts/src/wire.ts.
-const WIRE_VERSION: u32 = 3;
+const WIRE_VERSION: u32 = 4;
 
 /// 能力名只说做什么，不带实现前缀（ADR-017）。以前是 pet.bubble.open，换实现
 /// 就得改调用方；现在由寻址键决定谁提供，壳和界面共用同一份字符串，
@@ -323,6 +332,33 @@ fn show_bubble(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 对话条换高。**和摘要条一样，改的是窗口高度而不是界面的一个类**：
+/// 窗口不够高，被切掉的正是内容 —— 而对话条被切掉的那一半恰好是输入框，
+/// 看上去就像「ONE 突然不能打字了」。
+///
+/// 三档而不是一个布尔：待确认卡片带按钮，结果卡不带，两者差着一行。塞进同一
+/// 档的话，要么结果卡下面空一大块，要么带按钮那张被切掉 —— 实机两种都拍到过。
+///
+/// 改完要重新仲裁整组：变高之后它可能占掉摘要条的位置，也可能自己放不下。
+/// 只挪自己一个，会留下一个压在它上面的摘要条（ADR-020 的同一条纪律）。
+#[tauri::command]
+fn resize_bubble(app: AppHandle, mode: String) -> Result<(), String> {
+    let height = match mode.as_str() {
+        "normal" => BUBBLE_HEIGHT,
+        "card" => BUBBLE_CARD_HEIGHT,
+        "action" => BUBBLE_ACTION_HEIGHT,
+        other => return Err(format!("未知的对话条高度：{other}")),
+    };
+    let bubble = app
+        .get_webview_window(BUBBLE)
+        .ok_or("bubble window is missing")?;
+    bubble
+        .set_size(tauri::LogicalSize::new(BUBBLE_WIDTH, height))
+        .map_err(|error| error.to_string())?;
+    relayout(&app).inspect_err(|error| eprintln!("one: 改完对话条高度摆不好：{error}"))?;
+    Ok(())
+}
+
 /// 摘要条落位。焦点不抢：摘要是常驻的，一弹出来就把焦点抢走会让正在输入的
 /// 对话条失手。
 fn show_summary(app: &AppHandle) -> Result<(), String> {
@@ -542,6 +578,7 @@ fn shell_commands() -> Vec<&'static str> {
         "open_summary",
         "hide_summary",
         "resize_summary",
+            "resize_bubble",
         "hide_pet",
         "show_pet",
         "popup_pet_menu",
@@ -747,7 +784,7 @@ fn build_pet_windows(app: &AppHandle) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     WebviewWindowBuilder::new(app, BUBBLE, app_url())
         .title("ONE")
-        .inner_size(380.0, 168.0)
+        .inner_size(BUBBLE_WIDTH, BUBBLE_HEIGHT)
         .visible(false)
         // 对话条是浮在桌面上的一条，不是窗口：系统标题栏和菜单栏都不该出现，
         // 关闭和移动由条上的 ✕ 与握把负责。
@@ -1026,6 +1063,7 @@ fn main() {
             open_summary,
             hide_summary,
             resize_summary,
+            resize_bubble,
             hide_pet,
             show_pet,
             start_drag,

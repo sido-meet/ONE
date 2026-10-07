@@ -4,7 +4,9 @@
   import type { AgentId, Message } from '../../packages/contracts/src';
   import { client, link } from '../lib/client';
   import { pickActiveConversationId } from '../lib/active';
+  import { pendingOf } from '../lib/proposal';
   import { shell } from '../lib/tauri';
+  import ProposalCard from './ProposalCard.svelte';
 
   let snapshot = $state(client.getSnapshot());
   let input = $state('');
@@ -39,11 +41,48 @@
   });
 
   /**
+   * 有待确认的日程时，云让位给卡片。
+   *
+   * 不是「顺便加一行」：正是在这种时候用户最需要一个能点的按钮 —— 本体已经把
+   * 草稿摆在桌面端上了，宠物端装作没看见，用户会以为刚才那句白说了。
+   */
+  const pendingProposal = $derived(
+    coreState === 'ready' ? pendingOf(snapshot.proposals) : undefined,
+  );
+
+  /**
+   * 刚被处理掉的那条也要露一下脸。
+   *
+   * 云表示的是「**当下**」，而刚跑完的那句回复写的是「确认后才会写进日历」。
+   * 草稿已经写进去了、云里还挂着这句承诺 —— 那不是过时文案，是界面在说假话。
+   * 只在「这条提议是在本窗口打开之后才被解决的」时才显示它，因此关掉再打开
+   * 就回到状态云，不会永远停在一张旧结果卡上。
+   */
+  let settledAtMount = new Set<string>();
+  onMount(() => {
+    settledAtMount = new Set(
+      snapshot.proposals
+        .filter((item) => item.status !== 'pending')
+        .map((item) => item.id),
+    );
+  });
+  const freshOutcome = $derived.by(() => {
+    if (coreState !== 'ready' || pendingProposal) return undefined;
+    return [...snapshot.proposals]
+      .reverse()
+      .find(
+        (item) => item.status !== 'pending' && !settledAtMount.has(item.id),
+      );
+  });
+  const shownProposal = $derived(pendingProposal ?? freshOutcome);
+
+  /**
    * 云只表示"正在做什么"，不是聊天记录：给一行状态加一段被截断的回答。
    * 没有本体时如实说没连接，绝不拿上一轮的旧内容冒充现在的状态。
    */
   const preview = $derived.by(() => {
     if (coreState !== 'ready') return '';
+    if (pendingProposal) return '';
     const live = activeRun ? snapshot.drafts[activeRun.id] : undefined;
     const text = activeRun
       ? live || '正在准备回复…'
@@ -70,6 +109,22 @@
       stop();
       stopLink();
     };
+  });
+
+  /**
+   * 有待确认的草稿就把对话条撑高，解决完收回去。
+   *
+   * 比的是「上一次是什么状态」而不是「现在是不是高」—— 直接调 `setSize` 的话，
+   * 每次快照推送都会对壳喊一嗓子同样的尺寸，而壳每次都要重新仲裁一整组窗口。
+   */
+  let wasTall: string | null = null;
+  $effect(() => {
+    const mode = pendingProposal ? 'action' : freshOutcome ? 'card' : 'normal';
+    // 比的是「上一次是什么状态」而不是「现在该是几档」—— 否则每次快照推送都要
+    // 对壳喊一嗓子同样的尺寸，而壳每次都要重新仲裁一整组窗口。
+    if (wasTall === mode) return;
+    wasTall = mode;
+    void shell.resizeBubble(mode).catch(() => undefined);
   });
 
   async function send() {
@@ -126,16 +181,20 @@
         ✕
       </button>
     </p>
-    <p
-      class="cloud-body"
-      class:working={!!activeRun}
-      class:muted={coreState !== 'ready'}
-    >
-      {coreState === 'ready'
-        ? preview
-        : link.problem() ||
-          '本体没有运行或还没接受这个客户端，这里不会显示旧内容。'}
-    </p>
+    {#if shownProposal}
+      <ProposalCard proposal={shownProposal} compact />
+    {:else}
+      <p
+        class="cloud-body"
+        class:working={!!activeRun}
+        class:muted={coreState !== 'ready'}
+      >
+        {coreState === 'ready'
+          ? preview
+          : link.problem() ||
+            '本体没有运行或还没接受这个客户端，这里不会显示旧内容。'}
+      </p>
+    {/if}
   </section>
 
   <form

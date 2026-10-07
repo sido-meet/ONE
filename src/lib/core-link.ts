@@ -8,6 +8,7 @@ import type {
   DeleteResult,
   Note,
   NotePage,
+  ProposalResolution,
   Snapshot,
 } from '../../packages/contracts/src/index.ts';
 import type {
@@ -58,6 +59,7 @@ export const EMPTY_SNAPSHOT: Snapshot = {
   events: [],
   runs: [],
   drafts: {},
+  proposals: [],
 };
 
 /** 本体多久不回就算它没在。慢于这个数的调用会得到 TIMEOUT 而不是永久挂起。 */
@@ -129,6 +131,19 @@ export interface CoreClient {
    * 也就照旧在本体边界校验一次（ADR-016）。
    */
   callCommand(command: string, args: unknown[]): Promise<unknown>;
+  /**
+   * 确认或拒绝一条待写入的提议（ADR-022）。
+   *
+   * 界面给的只是**决定**，不是写入指令：本体才是唯一动手的人（ADR-016）。
+   *
+   * 重复确认不会重复创建，返回的 `applied: false` 就是给界面据实说明「已经建过
+   * 了」的那一位 —— 不写成「又成功了一次」，也不报错把用户吓一跳。
+   */
+  resolveProposal(
+    proposalId: string,
+    decision: 'confirm' | 'reject',
+    reason?: string,
+  ): Promise<ProposalResolution>;
   /** 声明本客户端能被别人调用的能力。 */
   expose(capability: string, handler: (args: unknown) => unknown): void;
   dispose(): void;
@@ -411,6 +426,18 @@ export function createCoreClient(
       sendMessage: (conversationId: string, text: string) =>
         call('sendMessage', [conversationId, text]),
       cancelRun: (runId: string) => call('cancelRun', [runId]),
+      /**
+       * 界面**不能**自己解决提议：写入领域数据的一直是本体（ADR-016/022）。
+       *
+       * 这一条只是把用户的决定送过去 —— 本体决定要不要写、写没写。真正的入口是
+       * `resolveProposal`，界面不该拿一个「处理结果」对象反过来当命令用。
+       */
+      settleProposal: (proposalId: string, resolution: ProposalResolution) =>
+        call('proposalResolve', [
+          resolution.status === 'created'
+            ? { proposalId, decision: 'confirm' }
+            : { proposalId, decision: 'reject', reason: resolution.reason },
+        ]),
       dispose,
     },
     /**
@@ -467,6 +494,12 @@ export function createCoreClient(
         args,
       }),
     callCommand: (command, args) => call(command, args),
+    resolveProposal: (proposalId, decision, reason) =>
+      call<ProposalResolution>('proposalResolve', [
+        decision === 'confirm'
+          ? { proposalId, decision }
+          : { proposalId, decision, reason },
+      ]),
     expose: (capability, handler) => {
       capabilities.set(capability, handler);
     },

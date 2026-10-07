@@ -444,6 +444,7 @@ describe('命令上下文的归属', () => {
       events: [],
       runs: [],
       drafts: {},
+      proposals: [],
     };
     const context = summaryCommandContext(snapshot);
     expect(context.workspaceId).toBe('w-home');
@@ -462,6 +463,7 @@ describe('命令上下文的归属', () => {
       events: [],
       runs: [],
       drafts: {},
+      proposals: [],
     };
     expect(summaryCommandContext(snapshot).requestId).not.toBe(
       summaryCommandContext(snapshot).requestId,

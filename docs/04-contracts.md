@@ -38,17 +38,20 @@ erDiagram
 
 会话、Agent、Run 全在这一层，与领域能力无关。原 `OneClient` 同时挂着日历与笔记命令，换一个日历实现就等于把会话状态机一起换掉，因此已按 ADR-016 拆开。
 
-| 方法               | 输入 / 输出                    | 语义                                   |
-| ------------------ | ------------------------------ | -------------------------------------- |
-| getSnapshot        | → Snapshot                     | 同步返回副本，调用方修改不影响内部状态 |
-| subscribe          | callback → unsubscribe         | 订阅快照变化，第一次由调用方读取       |
-| createConversation | title? → Conversation          | 个人空间创建，默认 Chat Agent          |
-| changeAgent        | conversationId, agentId → void | 运行中 BUSY，同 Agent 为无操作         |
-| sendMessage        | conversationId, text → Run     | 先提交用户消息与启动事件，再模拟回复   |
-| cancelRun          | runId → void                   | 已结束则无操作；未知 Run 为 NOT_FOUND  |
-| dispose            | → void                         | 释放计时器与订阅，调用方不再使用该实例 |
+| 方法               | 输入 / 输出                               | 语义                                   |
+| ------------------ | ----------------------------------------- | -------------------------------------- |
+| getSnapshot        | → Snapshot                                | 同步返回副本，调用方修改不影响内部状态 |
+| subscribe          | callback → unsubscribe                    | 订阅快照变化，第一次由调用方读取       |
+| createConversation | title? → Conversation                     | 个人空间创建，默认 Chat Agent          |
+| changeAgent        | conversationId, agentId → void            | 运行中 BUSY，同 Agent 为无操作         |
+| sendMessage        | conversationId, text → Run                | 先提交用户消息与启动事件，再模拟回复   |
+| cancelRun          | runId → void                              | 已结束则无操作；未知 Run 为 NOT_FOUND  |
+| settleProposal     | proposalId, ProposalResolution → Proposal | 本体写回处理结果；重复处理 CONFLICT    |
+| dispose            | → void                                    | 释放计时器与订阅，调用方不再使用该实例 |
 
 `Snapshot` **不再含** `notes` / `calendarEvents`：领域数据归提供方，挂在会话快照里意味着每次广播都捎带一次全量日历。
+
+`Snapshot` **含** `proposals`：待确认与已解决的提议。这不违反上一条 —— **提议还不是领域数据**，它是一句「打算写什么」；落库之后本体就把它解决掉（`proposal.settled`），实体仍然只在提供方那里。
 
 ## 已实现：领域端口（CalendarProvider / NotesProvider）
 
@@ -100,6 +103,32 @@ erDiagram
 | `state.revision`                 | 本体每帧状态带的版本号（已有）                 | 摘要底下写「本体状态 #7」      |
 
 `CoreClient.revision()` 是新增的**读取口**（没收到过状态帧时是 `-1`，不是 `0`）。`client_identity.summaryExpanded` 也是新增的**询问**：展开与否由窗口高度决定，高度只有壳知道，界面不自己记一份。
+
+## 已实现：提议契约（ADR-022）
+
+`packages/contracts/src/proposal.ts`。协议版本因此升到 **wire v4**。
+
+| 命令              | 入参                              | 出参                 | 边界上的行为                                                                                 |
+| ----------------- | --------------------------------- | -------------------- | -------------------------------------------------------------------------------------------- |
+| `proposalResolve` | `{proposalId, decision, reason?}` | `ProposalResolution` | 不存在为 NOT_FOUND；**已解决过的返回既有结果**且 `applied:false`；`reject` 必须带非空 reason |
+| `listProposals`   | —                                 | 摘要列表             | 读的是同一份状态，命令行与排障用                                                             |
+
+| 类型                 | 作用                                                                               |
+| -------------------- | ---------------------------------------------------------------------------------- |
+| `Proposal`           | 判别联合（`domain: 'calendar' \| 'notes'`），带 `status` 与两处结果字段            |
+| `ProposalDraft`      | 日程草稿**不含幂等键**——键由提议 id 派生                                           |
+| `ProposalResolution` | `applied` 是这里唯一需要解释的字段：重复确认时为 `false`，界面据此说「已经建过了」 |
+
+四条随形状一起定下的规矩：
+
+1. **幂等键由提议 id 派生，不接受外部指定。** 「重复确认不重复创建」靠调用方传对键只是一句约定；派生之后它是结构性的。
+2. **提议只描述意图，不复制领域实体**，但带 `sourceConversationId` —— 「这条日程是哪句话来的」必须答得出来。
+3. **认不出就说认不出。** 日程草稿靠一张中文句式表（`packages/mock-runtime/src/schedule.ts`），失败时返回一句能直接说给用户听的话，而不是塞一个看起来合理的时间。
+4. **解决一次就定了。** 要改主意就在聊天里再说一遍，那会是一条新提议；这条换掉的是「已经创建的提议再点拒绝」那条撒谎的路。
+
+**为什么升版本而不是加可选字段**：v3 的本体会**静默丢掉**提议，界面上的「确认」按钮点下去永远没有回音 —— 用户看到的是一张装点门面的卡片，比没有更糟。这与 v2→v3 加 `view` 是同一条理由。Rust 侧 `main.rs` 的 `WIRE_VERSION` 与 `wire.ts` 各有一份，靠一条会去读那个文件的 Rust 测试防漂移。
+
+卡片上的时间**直接拆 RFC3339 字符串**，不走 `Date` 的本地化 —— 那串字符里的 `+08:00` 就是提议声明的那个墙上时间；拿 `getHours()` 读，读到的是**这台机器**的时区。
 
 **摘要条是只读窗口但会发命令**：`windowRole: 'view'`，不握手、走 `core_replay` 拿状态与名册，取数仍走正常的 `call` 帧。`core_replay` 只重放 `welcome` / `state` / `roster` 三帧，命令回执绝不重放。
 

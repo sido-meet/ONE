@@ -120,6 +120,29 @@ export async function runCli(argv: string[], pipe?: string) {
       args: [context, parsed],
     }));
     process.stdout.write(`${JSON.stringify(reply)}\n`);
+  } else if (first === 'proposal') {
+    // 提议也要能命令行处理。宠物窗口可能正被别的东西盖住、拿不到焦点，
+    // 而「本体不依赖图形界面就能用」是这条命令行存在的理由 —— 只在界面上
+    // 能点的按钮，等于给卡住的时候留了一条死路。
+    const action = second ?? 'list';
+    const reply =
+      action === 'list'
+        ? await ask((id) => ({ t: 'call', id, cmd: 'listProposals', args: [] }))
+        : await ask((id) => ({
+            t: 'call',
+            id,
+            cmd: 'proposalResolve',
+            args: [
+              action === 'confirm'
+                ? { proposalId: argv[2] ?? '', decision: 'confirm' }
+                : {
+                    proposalId: argv[2] ?? '',
+                    decision: 'reject',
+                    reason: argv.slice(3).join(' '),
+                  },
+            ],
+          }));
+    process.stdout.write(`${JSON.stringify(reply)}\n`);
   } else if (first === 'launch') {
     const reply = await ask((id) => ({
       t: 'clients.launch',

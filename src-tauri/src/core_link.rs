@@ -798,7 +798,7 @@ mod tests {
             provider: "pet".into(),
             label: "ONE 宠物".into(),
             capabilities: Vec::new(),
-            wire_version: 3,
+            wire_version: 4,
             core_version: Mutex::new(None),
         core_problem: Mutex::new(None),
             writer: Mutex::new(None),
@@ -808,6 +808,30 @@ mod tests {
             waiting: Mutex::new(HashMap::new()),
             last_frames: Mutex::new(Vec::new()),
         })
+    }
+
+    #[test]
+    fn the_shell_and_the_contract_agree_on_the_wire_version() {
+        // 协议版本在 wire.ts 与 main.rs 各有一份。注释说「保持同步」是没用的 ——
+        // 真同步要靠这条测试去读那一份真的文件。
+        //
+        // 不同步的后果不是报错：本体按 v4 的版本表拒掉一个报 v3 的客户端，
+        // 界面上只写「协议版本不兼容」，没人知道该改哪个数字。
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("仓库根目录")
+                .join("packages/contracts/src/wire.ts"),
+        )
+        .expect("读得到 wire.ts");
+        let declared = source
+            .lines()
+            .find_map(|line| {
+                let rest = line.trim().strip_prefix("export const WIRE_VERSION =")?;
+                rest.trim().trim_end_matches(';').trim().parse::<u32>().ok()
+            })
+            .expect("wire.ts 里写着 WIRE_VERSION");
+        assert_eq!(declared, crate::WIRE_VERSION, "壳与契约的协议版本不一致");
     }
 
     #[test]
