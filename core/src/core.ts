@@ -138,6 +138,20 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
   };
 
   /**
+   * 可选文本参数。**`null` 是管道里「没有值」的写法。**
+   *
+   * `JSON.stringify([undefined])` 得到的是 `"[null]"` —— 管道传不了 `undefined`。
+   * 而 `function f(x = '默认')` 只对 `undefined` 生效，对 `null` 不生效，于是
+   * `x.trim()` 抛异常。实测后果：桌面端「开始新对话」一点就是
+   * 「ONE 内部出了点问题」，对话根本没建出来。
+   *
+   * 默认参数在这里是个陷阱：它让人以为「不传就安全」。可选参数在本体边界一律
+   * 显式归一，别指望下游的默认值。
+   */
+  const optionalText = (raw: unknown): string | undefined =>
+    typeof raw === 'string' && raw.trim() ? raw.trim() : undefined;
+
+  /**
    * 名册是「参与者」而不是「客户端」：呈现形式与领域提供方都能查得到。
    * 但界面不要把提供方画成宠物 —— 两者的图标与可用操作不同（ADR-017）。
    */
@@ -268,7 +282,7 @@ export function createCore(runtime: ConversationRuntime, options: CoreOptions) {
    */
   const commands: Record<string, (...args: unknown[]) => Promise<unknown>> = {
     createConversation: (...args) =>
-      runtime.createConversation(args[0] as string | undefined),
+      runtime.createConversation(optionalText(args[0])),
     changeAgent: (...args) =>
       runtime.changeAgent(args[0] as string, args[1] as AgentId),
     sendMessage: (...args) =>

@@ -241,12 +241,17 @@ export function createMockClient(
         listeners.delete(listener);
       };
     },
-    async createConversation(title = '新的对话') {
+    async createConversation(title?: string | null) {
       assertOpen();
+      // **不用默认参数。** `function f(x = '默认')` 只对 `undefined` 生效，
+      // 而管道传不了 `undefined`：`JSON.stringify([undefined])` 得到的是
+      // `"[null]"`。于是 `x.trim()` 在真实调用路径上抛异常 —— 桌面端
+      // 「开始新对话」一点就是「ONE 内部出了点问题」，对话压根没建出来。
+      const text = typeof title === 'string' ? title.trim() : '';
       const conversation: Conversation = {
         id: crypto.randomUUID(),
         workspaceId: 'personal',
-        title: title.trim() || '新的对话',
+        title: text || '新的对话',
         agentId: 'chat',
         createdAt: new Date().toISOString(),
       };

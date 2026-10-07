@@ -145,10 +145,17 @@ const reject = (reason: string, near = false): ScheduleAttempt => ({
 });
 
 /**
- * 句子里有没有钟点词。这是「像在安排一件事」与「只是闲聊」的分界，也是
- * `near` 的判据：`3点`、`15:00`、`上午九点` 都算，没说钟点就不算。
+ * 句子里有没有**认得出的钟点**。这是「像在安排一件事」与「只是闲聊」的分界，
+ * 也是 `near` 的判据。
+ *
+ * 直接用 `TIME_PATTERN` 试，而不是找一个「时」或「点」的单字 —— 实机抓到的：
+ * 一句「这句话会先撞上注入的超时」被日程接走了，回了一句「没听出是哪一天」。
+ * 「超时」「时间」「小时」「重点」里都有那个字。日历提示挂在跟它毫无关系的
+ * 句子上，用户看到的是系统在挑刺。
+ *
+ * 用解析器自己的正则，判据就与「我到底会认出什么」永远一致，不会各说各话。
  */
-const CLOCK_HINT = /[点时]|\d\s*[:：]/;
+const spokeClock = (input: string) => TIME_PATTERN.test(input);
 
 /**
  * 抽草稿。`now` 是基准时刻（测试传固定值，不依赖真实时钟）。
@@ -156,26 +163,27 @@ const CLOCK_HINT = /[点时]|\d\s*[:：]/;
  * 失败时给的是**可以直接说给用户听的一句话**，不是错误码：Agent 要把它讲出来，
  * 所以必须像人话，而且要带上「怎么说它才听得懂」的例子。
  *
- * `near` 一路跟着「有没有钟点词」走，原因写在 `CLOCK_HINT` 上面：「今天天气
- * 不错」里也有「今天」，拿日期词当「像在安排事」的判据等于没有判据。
+ * `near` 一路跟着「有没有认得出的钟点」走，原因写在 `spokeClock` 上面：「今天
+ * 天气不错」里也有「今天」，拿日期词当「像在安排事」的判据等于没有判据；
+ * 「超时」「时间」里都有「时」，拿单字当判据会把日历提示挂在不相干的句子上。
  */
 export function parseSchedule(text: string, now: Date): ScheduleAttempt {
   const input = text.trim();
   if (!input) return reject('没听清要安排什么。');
 
-  const spokeClock = CLOCK_HINT.test(input);
+  const clock = spokeClock(input);
   const dayMatch = input.match(DAY_PATTERN);
   if (!dayMatch)
     return reject(
       '没听出是哪一天。试试「明天下午三点安排面试」这种说法。',
-      spokeClock,
+      clock,
     );
 
   const timeMatch = input.match(TIME_PATTERN);
   if (!timeMatch)
     return reject(
       '没听出是几点。试试「明天下午三点安排面试」这种说法。',
-      spokeClock,
+      clock,
     );
 
   const [, periodWord, rawHour = '', rawMinute] = timeMatch;

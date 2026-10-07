@@ -144,4 +144,20 @@ describe('中文日程句式', () => {
     expect(nearOf('明天面试')).toBe(false);
     expect(nearOf('你记得今天开会吗')).toBe(false);
   });
+
+  it('「时」「点」单字不算钟点 —— 实机抓到的误判', () => {
+    // 曾经用 /[点时]/ 当判据，于是「这句话会先撞上注入的超时」被日程接走，
+    // 回了一句「没听出是哪一天」。日历提示挂在不相干的句子上，像系统在挑刺。
+    const nearOf = (text: string) => {
+      const result = parseSchedule(text, NOW);
+      if (result.ok) throw new Error(`本该拒绝却认出来了：${text}`);
+      return result.near;
+    };
+    expect(nearOf('这句话会先撞上注入的超时')).toBe(false);
+    expect(nearOf('今天花了不少时间')).toBe(false);
+    expect(nearOf('明天什么时候有空')).toBe(false);
+    expect(nearOf('重点是明天要做的事')).toBe(false);
+    // 但真钟点仍然算 —— 「15:00面试」缺的是日期，那句提示最该讲。
+    expect(nearOf('15:00面试')).toBe(true);
+  });
 });

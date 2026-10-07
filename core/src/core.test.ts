@@ -43,6 +43,13 @@ const lastResult = (client: ReturnType<typeof fakeClient>) => {
   return last;
 };
 
+/** 成功回执里的值。失败时直接把错误喊出来 —— 断言 `.value` 时报这个更有用。 */
+const resultValue = (client: ReturnType<typeof fakeClient>): unknown => {
+  const last = lastResult(client);
+  if (!last.ok) throw new Error(`本该成功却失败了：${last.error.message}`);
+  return last.value;
+};
+
 let client: ConversationRuntime;
 let core: Core;
 
@@ -270,5 +277,52 @@ describe('ONE core', () => {
     const cli = fakeClient();
     core.connect(cli.connection, hello('cli'));
     expect(core.installed()).toEqual(['pet']);
+  });
+
+  /**
+   * `null` 是管道里「没有值」的写法。
+   *
+   * `JSON.stringify([undefined])` 得到的是 `"[null]"`。以前 `createConversation`
+   * 把这个 `null` 原样递给运行时，而运行时的默认参数 `title = '新的对话'` 只对
+   * `undefined` 生效 —— `null.trim()` 抛异常。实测后果：桌面端「开始新对话」
+   * 一点就是「ONE 内部出了点问题」，对话压根没建出来。
+   */
+  it('不传标题时也能建对话（null 是管道里的「没传值」）', async () => {
+    const cli = fakeClient();
+    const session = core.connect(cli.connection, hello('cli'));
+    if (!session) throw new Error('握手失败');
+    core.handleMessage(session, {
+      t: 'call',
+      id: 'c1',
+      cmd: 'createConversation',
+      // 走一遍真实的 JSON 往返，而不是直接调函数 —— 那个 bug 正是在这里。
+      args: JSON.parse(JSON.stringify([undefined])),
+    } as never);
+    await Promise.resolve();
+    await Promise.resolve();
+    const reply = lastResult(cli);
+    expect(reply.ok).toBe(true);
+    expect(resultValue(cli)).toMatchObject({ title: '新的对话' });
+    expect(core.installed()).toEqual(['pet']);
+  });
+
+  it('空标题与空白标题都按默认名算，不建出一条空白对话', async () => {
+    for (const [id, title] of [
+      ['c2', ''],
+      ['c3', '   '],
+    ] as const) {
+      const cli = fakeClient();
+      const session = core.connect(cli.connection, hello('cli'));
+      if (!session) throw new Error('握手失败');
+      core.handleMessage(session, {
+        t: 'call',
+        id,
+        cmd: 'createConversation',
+        args: [title],
+      } as never);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(resultValue(cli)).toMatchObject({ title: '新的对话' });
+    }
   });
 });
