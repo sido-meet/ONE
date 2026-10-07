@@ -30,7 +30,7 @@
         opacity: 0.7;
         font-size: 12px;
       }
-      form {
+      #add {
         display: grid;
         gap: 6px;
         margin-bottom: 14px;
@@ -135,11 +135,16 @@
       这个页面由笔记插件自己提供，运行在没有网络与文件权限的沙箱里。
     </p>
 
-    <form id="add">
-      <input id="title" placeholder="新笔记标题" autocomplete="off" required />
+    <!--
+      这里刻意**不是** `<form>`：沙箱 iframe 只给了 `allow-scripts`，没给 `allow-forms`，
+      浏览器会在触发 `submit` 事件之前就把提交挡掉，按钮点了没反应也不报错（ADR-018）。
+      提交走显式按钮，校验自己写 —— `required` 只在表单里才起作用。
+    -->
+    <div id="add">
+      <input id="title" placeholder="新笔记标题" autocomplete="off" />
       <textarea id="body" placeholder="正文（可留空）"></textarea>
-      <button type="submit">记下来</button>
-    </form>
+      <button type="button" id="create">记下来</button>
+    </div>
 
     <p class="status" id="status" role="status"></p>
     <div id="list"><p class="empty">正在读取…</p></div>
@@ -191,6 +196,22 @@
       }
 
       /**
+       * 把同步抛出的异常变成一句话给用户看：处理器里抛了，界面上只会安静，
+       * 用户看到的跟「程序坏了」分不开。
+       */
+      function guard(run) {
+        try {
+          return run();
+        } catch (error) {
+          say((error && error.message) || String(error), 'error');
+        }
+      }
+
+      window.addEventListener('error', function (event) {
+        say('页面出错：' + ((event && event.message) || '未知错误'), 'error');
+      });
+
+      /**
        * 正在编辑的那一条。
        *
        * `version` 是**打开编辑器时**看到的版本 —— 保存时按它走 `expectedVersion`，
@@ -217,7 +238,9 @@
         node.className = 'ghost';
         node.type = 'button';
         node.textContent = text;
-        node.addEventListener('click', onClick);
+        node.addEventListener('click', function () {
+          guard(onClick);
+        });
         return node;
       }
 
@@ -425,12 +448,17 @@
           });
       }
 
-      el('add').addEventListener('submit', function (event) {
-        event.preventDefault();
-        var button = event.target.querySelector('button');
-        button.disabled = true;
+      /** 新建笔记。没有表单，校验自己写（见上面那段注释）。 */
+      function createNote() {
+        var title = el('title').value.trim();
+        if (!title) {
+          say('先给笔记起个标题。', 'error');
+          return;
+        }
+        var send = el('create');
+        send.disabled = true;
         ask('notes.create', {
-          title: el('title').value,
+          title: title,
           body: el('body').value,
           idempotencyKey: crypto.randomUUID(),
         })
@@ -444,8 +472,27 @@
             say(error.message, 'error');
           })
           .then(function () {
-            button.disabled = false;
+            send.disabled = false;
           });
+      }
+
+      el('create').addEventListener('click', function () {
+        guard(createNote);
+      });
+
+      // 标题上回车直接提交；正文里回车要换行，所以用 Ctrl+Enter。
+      // 两处都要看 `isComposing`：输入法里回车先用来上屏（P06 要试的手感）。
+      el('title').addEventListener('keydown', function (event) {
+        if (event.key === 'Enter' && !event.isComposing) {
+          event.preventDefault();
+          guard(createNote);
+        }
+      });
+      el('body').addEventListener('keydown', function (event) {
+        if (event.key === 'Enter' && event.ctrlKey && !event.isComposing) {
+          event.preventDefault();
+          guard(createNote);
+        }
       });
 
       refresh();

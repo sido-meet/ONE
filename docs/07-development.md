@@ -151,11 +151,13 @@ node .one/run-cli.mjs .one\out.json notes update '{"id":"<id>","expectedVersion"
 
 `notes get` 不是多余的：列表按契约剥掉正文，没有它就拿不到一条能编辑的笔记。它也是核对「冲突到底有没有被静默写进去」最快的办法 —— 撞完冲突后再 `get` 一次，看版本号和正文是不是还是别人写的那一版。
 
-四条容易踩的：
+五条容易踩的：
 
 - **`send` 之间要隔几秒。** 单对话同时只允许一个写入 Run，连着发会拿到 `BUSY` —— 那不是失败，是排队规则。
 - **`calendar list` 的三个字段都是必填**（`rangeStart` / `rangeEnd` / `timeZone`），少一个就是一条 `VALIDATION` 报错。`timeZone` 要填 IANA 名（`Asia/Shanghai`），不是 `+08:00`。
 - **读回来的是** `{"role":"user"|"assistant","content":"…"}` **的数组**，按时间顺序。`notes list` / `calendar list` 的返回包在 `value.items` 里。
+- **插件页面里别写 `<form>`。** 沙箱 iframe 只有 `allow-scripts`，没有 `allow-forms`，浏览器会在触发 `submit` 事件之前就把提交挡掉：按钮点了没反应，控制台也不报错。提交走显式按钮 + 页面自己校验（ADR-018 第 5 条）。
+- **截图里有 ≠ 工作过。** 「加入日程」「记下来」这两个按钮从第一天起就没提交成功过，两轮验收都只拍了界面就记成 ✅。凡是能落到数据里的操作，验完都要用命令行读回来对账（`calendar list` / `notes get`），对不上就是没跑通。
 
 **`.one/` 里的验收脚本已被 gitignore。** `run-cli.mjs` 只是把 `core/src/cli.ts` 用管道驱动一遍（PowerShell 自己发命名管道帧很别扭），逻辑都在本体里。
 

@@ -30,13 +30,13 @@
         opacity: 0.7;
         font-size: 12px;
       }
-      form {
+      #add {
         display: grid;
         grid-template-columns: 1fr auto;
         gap: 6px;
         margin-bottom: 14px;
       }
-      form .row {
+      #add .row {
         grid-column: 1 / -1;
         display: flex;
         gap: 6px;
@@ -68,9 +68,35 @@
         align-items: baseline;
         padding: 7px 0;
         border-bottom: 1px solid var(--line);
+        flex-wrap: wrap;
       }
       li:last-child {
         border-bottom: 0;
+      }
+      /* 改期就地展开，挤在行下面而不是开出另一个窗口：
+         用户看的是「这一条」，弹走就别在对的那一条上了。 */
+      .editor {
+        flex: 1 0 100%;
+        display: grid;
+        gap: 6px;
+        padding: 4px 0 10px;
+      }
+      .editor .row {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .banner {
+        padding: 7px 9px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        font-size: 12px;
+        display: grid;
+        gap: 6px;
+      }
+      .banner[data-kind='conflict'] {
+        border-color: #b3261e;
       }
       .when {
         font-variant-numeric: tabular-nums;
@@ -103,21 +129,26 @@
       这个页面由日历插件自己提供，运行在没有网络与文件权限的沙箱里。
     </p>
 
-    <form id="add">
+    <!--
+      这里刻意**不是** `<form>`。
+
+      插件页面跑在只给了 `allow-scripts` 的沙箱 iframe 里（ADR-018），沙箱没开
+      `allow-forms`，于是浏览器会在触发 `submit` 事件**之前**就把表单提交挡掉：
+      按钮点下去毫无反应，控制台也不报错。实机量过 —— click 到了按钮，submit 没触发。
+      所以提交走显式按钮 + 自己的校验（`required` 只在表单里才起作用）。
+
+      也不去加 `allow-forms`：页面唯一的出口是 postMessage，导航语义它既没有也不该有。
+    -->
+    <div id="add">
       <div class="row">
-        <input
-          id="title"
-          placeholder="新日程标题"
-          autocomplete="off"
-          required
-        />
+        <input id="title" placeholder="新日程标题" autocomplete="off" />
       </div>
       <div class="row">
-        <input id="starts" type="datetime-local" required />
-        <input id="ends" type="datetime-local" required />
-        <button type="submit">加入日程</button>
+        <input id="starts" type="datetime-local" />
+        <input id="ends" type="datetime-local" />
+        <button type="button" id="create">加入日程</button>
       </div>
-    </form>
+    </div>
 
     <p class="status" id="status" role="status"></p>
     <div id="list"><p class="empty">正在读取…</p></div>
@@ -142,7 +173,15 @@
             clearTimeout(timer);
             window.removeEventListener('message', onMessage);
             if (data.ok) resolve(data.value);
-            else reject(new Error(data.message || '操作失败'));
+            else {
+              // **错误码要带上。** 少了它，「这条被别人改过了」与「日历源没连上」
+              // 长得一模一样，而这两件事要给的界面完全不同：前者得把用户填的留在
+              // 框里，后者只提示重试。
+              var failure = new Error(data.message || '操作失败');
+              failure.code = data.code;
+              failure.currentVersion = data.currentVersion;
+              reject(failure);
+            }
           }
           window.addEventListener('message', onMessage);
           // 页面不自带身份：宿主按窗口绑定的提供方转发，页面说什么都没用。
@@ -163,6 +202,24 @@
         node.setAttribute('data-kind', kind || 'info');
       }
 
+      /**
+       * 把同步抛出的异常变成一句话给用户看。
+       *
+       * 处理器里抛了异常，界面上只会「安静」—— 用户看到的是按钮点了没反应，跟程序坏了
+       * 分不开。这里统一兜一道，顺带在窗口层兜一道。
+       */
+      function guard(run) {
+        try {
+          return run();
+        } catch (error) {
+          say((error && error.message) || String(error), 'error');
+        }
+      }
+
+      window.addEventListener('error', function (event) {
+        say('页面出错：' + ((event && event.message) || '未知错误'), 'error');
+      });
+
       function zone() {
         try {
           return (
@@ -173,7 +230,32 @@
         }
       }
 
-      /** datetime-local 给的是本地时间，接口要的是带偏移的 RFC3339。 */
+      /** 本地钟面时间，形如 2026-10-07T18:01 —— datetime-local 输入框要的就是这个。 */
+      function wallClock(date, seconds) {
+        var pad = function (n) {
+          return String(n).padStart(2, '0');
+        };
+        return (
+          date.getFullYear() +
+          '-' +
+          pad(date.getMonth() + 1) +
+          '-' +
+          pad(date.getDate()) +
+          'T' +
+          pad(date.getHours()) +
+          ':' +
+          pad(date.getMinutes()) +
+          (seconds ? ':' + pad(date.getSeconds()) : '')
+        );
+      }
+
+      /**
+       * datetime-local 给的是本地时间，接口要的是带偏移的 RFC3339。
+       *
+       * 墙上钟面 + 本地偏移，`toISOString()` 不能用：那是 **UTC** 的钟面，配上本地
+       * 偏移就成了「本地时间减去一个时区」。实机抓到过：填 18:01 存进去是
+       * 10:01+08:00，事件直接落到 8 小时前，列表里都看不见。
+       */
       function toInstant(value) {
         var date = new Date(value);
         if (isNaN(date.getTime())) throw new Error('时间格式不正确');
@@ -183,12 +265,19 @@
           return String(Math.abs(n)).padStart(2, '0');
         };
         return (
-          date.toISOString().slice(0, 19) +
+          wallClock(date, true) +
           sign +
-          pad(Math.floor(offset / 60)) +
+          pad(Math.floor(Math.abs(offset) / 60)) +
           ':' +
-          pad(offset % 60)
+          pad(Math.abs(offset) % 60)
         );
+      }
+
+      /** 反过来：把接口给的 RFC3339 填回 datetime-local 输入框。 */
+      function toLocalInput(instant) {
+        var date = new Date(instant);
+        if (isNaN(date.getTime())) return '';
+        return wallClock(date, false);
       }
 
       function when(startsAt, endsAt) {
@@ -215,6 +304,144 @@
         return text;
       }
 
+      /**
+       * 改期就地展开。
+       *
+       * `version` 是**展开那一刻**的版本号；保存时作为 `expectedVersion` 送出去，
+       * 期间被别人改过就撞上，而不是默默盖掉对方的改动（ADR-024）。
+       *
+       * 日历不需要像笔记那样先 `get` 一次：列表返回的就是完整实体，标题与起止
+       * 时间本来就在手上。
+       */
+      var editing = null;
+
+      function editorFor(item) {
+        var box = document.createElement('div');
+        box.className = 'editor';
+        var titleField = document.createElement('input');
+        titleField.type = 'text';
+        titleField.placeholder = '标题';
+        titleField.autocomplete = 'off';
+        titleField.value = item.title;
+        var startsField = document.createElement('input');
+        startsField.type = 'datetime-local';
+        startsField.value = toLocalInput(item.startsAt);
+        var endsField = document.createElement('input');
+        endsField.type = 'datetime-local';
+        endsField.value = toLocalInput(item.endsAt);
+        var banner = document.createElement('div');
+        banner.className = 'banner';
+        banner.hidden = true;
+
+        var save = button('保存', function () {
+          save.disabled = true;
+          ask('calendar.update', {
+            id: item.id,
+            expectedVersion: item.version,
+            patch: {
+              title: titleField.value,
+              startsAt: toInstant(startsField.value),
+              endsAt: toInstant(endsField.value),
+              timeZone: zone(),
+            },
+            idempotencyKey: crypto.randomUUID(),
+          })
+            .then(function () {
+              editing = null;
+              say('已改期。');
+              return refresh();
+            })
+            .catch(function (error) {
+              save.disabled = false;
+              banner.hidden = false;
+              banner.textContent = '';
+              if (error.code === 'CONFLICT') {
+                banner.setAttribute('data-kind', 'conflict');
+                // 在草稿上只读地补两句：说清两边各是第几版，再给两条路。
+                banner.appendChild(
+                  document.createTextNode(
+                    '这条日程在你编辑期间被改过了（它现在是第 ' +
+                      (error.currentVersion || '?') +
+                      ' 版，你手上是第 ' +
+                      item.version +
+                      ' 版）。你填的都还在上面。',
+                  ),
+                );
+                var reload = button('放弃我的，重新载入', function () {
+                  editing = null;
+                  refresh();
+                });
+                var overwrite = button('用我填的覆盖', function () {
+                  // 覆盖要的是**对方的版本号**，而横幅上已经写着它 —— 不用为了拿一个
+                  // 数字再发一次请求。中间要是又被改了，那就再撞一次冲突，那是诚实
+                  // 的结果，不是错误。
+                  ask('calendar.update', {
+                    id: item.id,
+                    expectedVersion: error.currentVersion,
+                    patch: {
+                      title: titleField.value,
+                      startsAt: toInstant(startsField.value),
+                      endsAt: toInstant(endsField.value),
+                      timeZone: zone(),
+                    },
+                    idempotencyKey: crypto.randomUUID(),
+                  })
+                    .then(function () {
+                      editing = null;
+                      say('已用你填的覆盖。');
+                      return refresh();
+                    })
+                    .catch(function (again) {
+                      banner.setAttribute('data-kind', 'conflict');
+                      banner.textContent =
+                        '这次没写成功：' + again.message + '。你填的还在上面。';
+                      save.disabled = false;
+                    });
+                });
+                var actions = document.createElement('div');
+                actions.className = 'row';
+                actions.appendChild(reload);
+                actions.appendChild(overwrite);
+                banner.appendChild(actions);
+              } else {
+                banner.setAttribute('data-kind', 'error');
+                banner.textContent = error.message;
+              }
+            });
+        });
+
+        var row = document.createElement('div');
+        row.className = 'row';
+        var cancel = button('算了', function () {
+          editing = null;
+          refresh();
+        });
+        row.appendChild(save);
+        row.appendChild(cancel);
+
+        var times = document.createElement('div');
+        times.className = 'row';
+        times.appendChild(startsField);
+        times.appendChild(endsField);
+
+        box.appendChild(titleField);
+        box.appendChild(times);
+        box.appendChild(banner);
+        box.appendChild(row);
+        return box;
+      }
+
+      function button(text, onClick) {
+        var node = document.createElement('button');
+        node.className = 'ghost';
+        node.type = 'button';
+        node.textContent = text;
+        node.addEventListener('click', function () {
+          guard(onClick);
+        });
+        return node;
+      }
+
       function render(items) {
         var host = el('list');
         host.textContent = '';
@@ -234,11 +461,11 @@
           var what = document.createElement('span');
           what.className = 'what';
           what.textContent = item.title;
-          var drop = document.createElement('button');
-          drop.className = 'ghost';
-          drop.type = 'button';
-          drop.textContent = '删除';
-          drop.addEventListener('click', function () {
+          var move = button('改期', function () {
+            editing = item.id;
+            refresh();
+          });
+          var drop = button('删除', function () {
             drop.disabled = true;
             ask('calendar.remove', {
               id: item.id,
@@ -256,7 +483,9 @@
           });
           row.appendChild(whenNode);
           row.appendChild(what);
+          row.appendChild(move);
           row.appendChild(drop);
+          if (editing === item.id) row.appendChild(editorFor(item));
           list.appendChild(row);
         });
         host.appendChild(list);
@@ -280,12 +509,17 @@
           });
       }
 
-      el('add').addEventListener('submit', function (event) {
-        event.preventDefault();
-        var button = event.target.querySelector('button');
-        button.disabled = true;
+      /** 新建日程。校验自己写：没有表单，`required` 也就不会拦（见上面那段注释）。 */
+      function createEvent() {
+        var title = el('title').value.trim();
+        if (!title) {
+          say('先给日程起个标题。', 'error');
+          return;
+        }
+        var send = el('create');
+        send.disabled = true;
         ask('calendar.create', {
-          title: el('title').value,
+          title: title,
           startsAt: toInstant(el('starts').value),
           endsAt: toInstant(el('ends').value),
           timeZone: zone(),
@@ -300,30 +534,30 @@
             say(error.message, 'error');
           })
           .then(function () {
-            button.disabled = false;
+            send.disabled = false;
           });
+      }
+
+      el('create').addEventListener('click', function () {
+        guard(createEvent);
+      });
+
+      ['title', 'starts', 'ends'].forEach(function (id) {
+        el(id).addEventListener('keydown', function (event) {
+          // 回车提交：没有表单之后这个键得自己接住。
+          // `isComposing` 必须看 —— 中文输入法里回车先用来**上屏**，这时候提交等于
+          // 把还没选完的字提前发了出去（也正是 P06 要试的那一段手感）。
+          if (event.key === 'Enter' && !event.isComposing) {
+            event.preventDefault();
+            guard(createEvent);
+          }
+        });
       });
 
       var now = new Date();
       var later = new Date(now.getTime() + 3600000);
-      var pad = function (n) {
-        return String(n).padStart(2, '0');
-      };
-      var local = function (date) {
-        return (
-          date.getFullYear() +
-          '-' +
-          pad(date.getMonth() + 1) +
-          '-' +
-          pad(date.getDate()) +
-          'T' +
-          pad(date.getHours()) +
-          ':' +
-          pad(date.getMinutes())
-        );
-      };
-      el('starts').value = local(later);
-      el('ends').value = local(new Date(later.getTime() + 3600000));
+      el('starts').value = wallClock(later, false);
+      el('ends').value = wallClock(new Date(later.getTime() + 3600000), false);
       refresh();
     </script>
   </body>

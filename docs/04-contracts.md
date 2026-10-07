@@ -83,11 +83,12 @@ erDiagram
 | PageRequest  | `protocol, id, capability, args`                                | 页面 → 宿主 | `capability` 是能力名（`calendar.list`），不是命令名 |
 | PageResponse | `protocol, id, ok, value? / message? / code? / currentVersion?` | 宿主 → 页面 | 失败必须给 `message`，不许用空结果冒充成功           |
 
-三条不能省的约束：
+四条不能省的约束：
 
 - **能力名 → 命令名由宿主翻译**（`PAGE_DOMAIN_COMMANDS`）。`calendar.remove` 对应的本体命令是 `calendarDelete`，靠改写字符串得到的是另一个不存在的命令；而且翻译之后输入会**再过一次本体边界的校验**（ADR-016），直接按能力名转发会绕过那一次。
 - **页面没有身份字段。** 上下文 `workspaceId` / `source` 由宿主补，页面报了也不作数。宿主靠**窗口绑定**知道这个窗口属于哪个提供方（ADR-018 第 3 条）。
 - **页面路径受守卫**（`isPagePath`）：相对、无 `..`、无反斜杠，入口非法就当没申报 —— 宿主会把它拼进 `one-plugin://` 地址，坏路径必须在协议解析那一层挡住。
+- **页面提交操作不用 `<form>`。** 沙箱 iframe 只有 `allow-scripts`（ADR-018 第 5 条），`submit` 事件根本不会触发，按钮会静默失灵。契约上页面能做的事没变（`postMessage` + 能力名），变的只是页面自己怎么把「用户点了」翻译成一次 `ask()`。
 
 失败回执上的 `code` 与 `currentVersion` 是后加的两个可选字段：少了 `code`，「这条被别人改过了」与「日历源没连上」在页面上长得一模一样，而这两件事要给的界面完全不同（前者要留住用户打的字，后者只提示重试）；少了 `currentVersion`，界面只能说「被改过了」而给不出对方现在是第几版，用户没法决定是放弃自己那份还是再看一眼。`currentVersion` 只在 `code` 是 `CONFLICT` 且值是数字时才给，不猜。
 
